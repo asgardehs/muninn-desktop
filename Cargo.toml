@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/muninn-core"]
+resolver = "2"

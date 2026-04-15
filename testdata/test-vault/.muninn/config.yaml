@@ -1,0 +1,9 @@
+spec_version: "0.2.0"
+name: test-vault
+description: Test vault for muninn-core integration tests
+settings:
+  explicit_type_keys:
+    - type
+  grammar:
+    enabled: true
+    language: en-US
