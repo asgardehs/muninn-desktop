@@ -21,6 +21,7 @@ slug = "0.1"
 harper-core = "0.22"
 parking_lot = "0.12"
 glob = "0.3"
+sqlparser = "0.52"
 
 [dev-dependencies]
 tempfile = "3"

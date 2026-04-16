@@ -33,6 +33,10 @@ pub enum VaultError {
     Mdbase(String),
     #[error("walk error: {0}")]
     Walk(#[from] walkdir::Error),
+    #[error("query parse error: {0}")]
+    QueryParse(#[from] crate::query::ParseError),
+    #[error("query eval error: {0}")]
+    QueryEval(#[from] crate::query::EvalError),
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;
@@ -216,6 +220,12 @@ impl Vault {
         let notes = self.read_all_notes()?;
         let tag_lists: Vec<Vec<String>> = notes.iter().map(|n| n.tags.clone()).collect();
         Ok(tags::collect_tags(&tag_lists))
+    }
+
+    pub fn query(&self, sql: &str) -> Result<crate::query::QueryResultSet> {
+        let q = crate::query::parse_query(sql)?;
+        let rs = crate::query::execute(&self.root, &self.types, self.config.as_ref(), &q)?;
+        Ok(rs)
     }
 
     pub fn backlinks(&self, path: &Path) -> Vec<PathBuf> {
