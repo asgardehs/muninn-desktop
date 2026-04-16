@@ -14,6 +14,7 @@ use crate::markdown::{self, Note};
 use crate::mdbase::match_type::match_types;
 
 use super::ast::{BinaryOp, Expr, MuninnQuery, OrderBy, Projection, SortOrder, UnaryOp};
+use super::functions;
 use super::value::Value;
 use super::{ANY_TYPE_SOURCE, MAX_RESULT_ROWS};
 
@@ -59,10 +60,10 @@ pub fn execute(
     config: Option<&crate::mdbase::config::MdbaseConfig>,
     query: &MuninnQuery,
 ) -> Result<QueryResultSet, EvalError> {
-    let rows = load_source_rows(vault_root, types, config, &query.from)?;
+    let source = load_source_rows(vault_root, types, config, &query.from)?;
 
     let filtered: Vec<Note> = match &query.filter {
-        Some(expr) => rows
+        Some(expr) => source
             .into_iter()
             .filter_map(|n| match eval_predicate(expr, &RowCtx::new(&n)) {
                 Ok(true) => Some(Ok(n)),
@@ -70,16 +71,21 @@ pub fn execute(
                 Err(e) => Some(Err(e)),
             })
             .collect::<Result<Vec<_>, _>>()?,
-        None => rows,
+        None => source,
     };
 
     let columns = resolve_columns(&query.projections);
-    let mut rows: Vec<QueryResultRow> = filtered
-        .iter()
-        .map(|n| project_row(n, &query.projections, vault_root))
-        .collect::<Result<Vec<_>, _>>()?;
 
-    apply_order_by(&mut rows, &query.order_by, &filtered, vault_root)?;
+    let grouped = !query.group_by.is_empty()
+        || query.having.is_some()
+        || projections_have_aggregate(&query.projections);
+
+    let mut rows = if grouped {
+        execute_grouped(&filtered, query, vault_root)?
+    } else {
+        execute_simple(&filtered, query, vault_root)?
+    };
+
     apply_pagination(&mut rows, query.offset, query.limit);
 
     if rows.len() > MAX_RESULT_ROWS {
@@ -87,6 +93,331 @@ pub fn execute(
     }
 
     Ok(QueryResultSet { columns, rows })
+}
+
+fn execute_simple(
+    filtered: &[Note],
+    query: &MuninnQuery,
+    vault_root: &Path,
+) -> Result<Vec<QueryResultRow>, EvalError> {
+    let mut rows: Vec<QueryResultRow> = filtered
+        .iter()
+        .map(|n| project_row(n, &query.projections, vault_root))
+        .collect::<Result<Vec<_>, _>>()?;
+    let resolved_order: Vec<OrderBy> = query
+        .order_by
+        .iter()
+        .map(|ob| OrderBy {
+            expr: resolve_alias(&ob.expr, &query.projections),
+            order: ob.order,
+        })
+        .collect();
+    apply_order_by(&mut rows, &resolved_order, filtered, vault_root)?;
+    Ok(rows)
+}
+
+/// If `expr` is a bare column reference matching a projection alias, swap it
+/// for the underlying projection expression. Standard SQL behavior for
+/// ORDER BY clauses.
+fn resolve_alias(expr: &Expr, projections: &[Projection]) -> Expr {
+    if let Expr::Column(name) = expr {
+        for p in projections {
+            if let Projection::Expr {
+                expr: inner,
+                alias: Some(a),
+            } = p
+                && a == name
+            {
+                return inner.clone();
+            }
+        }
+    }
+    expr.clone()
+}
+
+/// GROUP BY + aggregate execution path.
+///
+/// Rows are bucketed by the values of each GROUP BY expression. Non-aggregate
+/// projection parts evaluate in the first row of the group; aggregate function
+/// calls fold the argument across all rows in the group. HAVING filters whole
+/// groups. ORDER BY evaluates against the same group context.
+fn execute_grouped(
+    filtered: &[Note],
+    query: &MuninnQuery,
+    vault_root: &Path,
+) -> Result<Vec<QueryResultRow>, EvalError> {
+    // One big group when GROUP BY is absent but aggregates are present (i.e.
+    // `SELECT COUNT(*) FROM note` with no GROUP BY).
+    let groups = build_groups(filtered, &query.group_by)?;
+
+    let mut rows: Vec<(Vec<Value>, QueryResultRow)> = Vec::with_capacity(groups.len());
+    for group in &groups {
+        if group.notes.is_empty() {
+            continue;
+        }
+
+        if let Some(expr) = &query.having {
+            let keep = eval_in_group(expr, group)?.is_truthy();
+            if !keep {
+                continue;
+            }
+        }
+
+        let mut cells = Vec::with_capacity(query.projections.len());
+        for p in &query.projections {
+            match p {
+                Projection::Wildcard => {
+                    return Err(EvalError::TypeMismatch(
+                        "SELECT * is not allowed with GROUP BY / aggregates".to_string(),
+                    ));
+                }
+                Projection::Expr { expr, .. } => {
+                    cells.push(eval_in_group(expr, group)?);
+                }
+            }
+        }
+
+        // ORDER BY keys evaluated in the same group context; resolve aliases
+        // so `ORDER BY my_alias` works when `my_alias` names a projection.
+        let sort_keys: Vec<Value> = query
+            .order_by
+            .iter()
+            .map(|ob| eval_in_group(&resolve_alias(&ob.expr, &query.projections), group))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let first_note = group.notes[0];
+        let rel = first_note
+            .path
+            .strip_prefix(vault_root)
+            .unwrap_or(&first_note.path);
+
+        rows.push((
+            sort_keys,
+            QueryResultRow {
+                path: rel.to_path_buf(),
+                cells,
+            },
+        ));
+    }
+
+    if !query.order_by.is_empty() {
+        rows.sort_by(|a, b| {
+            for ((ka, kb), ob) in a.0.iter().zip(b.0.iter()).zip(query.order_by.iter()) {
+                let ord = ka.cmp_for_order(kb);
+                if ord != std::cmp::Ordering::Equal {
+                    return if ob.order == SortOrder::Desc {
+                        ord.reverse()
+                    } else {
+                        ord
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    Ok(rows.into_iter().map(|(_, r)| r).collect())
+}
+
+struct Group<'a> {
+    key: Vec<Value>,
+    notes: Vec<&'a Note>,
+}
+
+fn build_groups<'a>(
+    filtered: &'a [Note],
+    group_by: &[Expr],
+) -> Result<Vec<Group<'a>>, EvalError> {
+    if group_by.is_empty() {
+        // Single synthetic group holding every filtered row.
+        return Ok(vec![Group {
+            key: Vec::new(),
+            notes: filtered.iter().collect(),
+        }]);
+    }
+
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for note in filtered {
+        let ctx = RowCtx::new(note);
+        let key: Vec<Value> = group_by
+            .iter()
+            .map(|e| eval_expr(e, &ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(existing) = groups.iter_mut().find(|g| keys_equal(&g.key, &key)) {
+            existing.notes.push(note);
+        } else {
+            groups.push(Group {
+                key,
+                notes: vec![note],
+            });
+        }
+    }
+    Ok(groups)
+}
+
+fn keys_equal(a: &[Value], b: &[Value]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| {
+        // NULL group keys match each other in GROUP BY semantics.
+        if x.is_null() && y.is_null() {
+            return true;
+        }
+        x.sql_eq(y).unwrap_or(false)
+    })
+}
+
+fn projections_have_aggregate(projs: &[Projection]) -> bool {
+    projs.iter().any(|p| match p {
+        Projection::Wildcard => false,
+        Projection::Expr { expr, .. } => expr_has_aggregate(expr),
+    })
+}
+
+fn expr_has_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function { name, args } => {
+            functions::is_aggregate(name) || args.iter().any(expr_has_aggregate)
+        }
+        Expr::Unary { expr, .. } => expr_has_aggregate(expr),
+        Expr::Binary { left, right, .. } => expr_has_aggregate(left) || expr_has_aggregate(right),
+        Expr::In { expr, list, .. } => {
+            expr_has_aggregate(expr) || list.iter().any(expr_has_aggregate)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => expr_has_aggregate(expr) || expr_has_aggregate(low) || expr_has_aggregate(high),
+        Expr::IsNull { expr, .. } => expr_has_aggregate(expr),
+        Expr::Like { expr, pattern, .. } => {
+            expr_has_aggregate(expr) || expr_has_aggregate(pattern)
+        }
+        Expr::Literal(_) | Expr::Column(_) => false,
+    }
+}
+
+fn eval_in_group(expr: &Expr, group: &Group<'_>) -> Result<Value, EvalError> {
+    match expr {
+        Expr::Function { name, args } if functions::is_aggregate(name) => {
+            if args.len() != 1 {
+                return Err(EvalError::TypeMismatch(format!(
+                    "{} expects exactly one argument",
+                    name.to_ascii_uppercase()
+                )));
+            }
+            let is_star = matches!(&args[0], Expr::Column(s) if s == "*");
+            let per_row: Vec<Value> = if is_star {
+                group.notes.iter().map(|_| Value::Null).collect()
+            } else {
+                group
+                    .notes
+                    .iter()
+                    .map(|n| eval_expr(&args[0], &RowCtx::new(n)))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            functions::fold_aggregate(name, &per_row, is_star)
+        }
+        Expr::Function { name, args } => {
+            // Non-aggregate function call inside group context — fall back to
+            // scalar evaluation using the first row.
+            let values: Vec<Value> = args
+                .iter()
+                .map(|a| eval_in_group(a, group))
+                .collect::<Result<Vec<_>, _>>()?;
+            functions::call_scalar(name, &values)
+        }
+        Expr::Literal(v) => Ok(v.clone()),
+        Expr::Column(name) => Ok(first_row_ctx(group)?.resolve(name)),
+        Expr::Unary { op, expr } => {
+            let v = eval_in_group(expr, group)?;
+            match op {
+                UnaryOp::Not => Ok(Value::Bool(!v.is_truthy())),
+                UnaryOp::Neg => match v {
+                    Value::Integer(n) => Ok(Value::Integer(-n)),
+                    Value::Float(f) => Ok(Value::Float(-f)),
+                    Value::Null => Ok(Value::Null),
+                    other => Err(EvalError::TypeMismatch(format!(
+                        "cannot negate {}",
+                        other.type_name()
+                    ))),
+                },
+            }
+        }
+        Expr::Binary { op, left, right } => {
+            let l = eval_in_group(left, group)?;
+            let r = eval_in_group(right, group)?;
+            eval_binary(*op, &l, &r)
+        }
+        Expr::In { expr, list, negated } => {
+            let v = eval_in_group(expr, group)?;
+            let mut any_match = false;
+            for item in list {
+                let rhs = eval_in_group(item, group)?;
+                if v.sql_eq(&rhs).unwrap_or(false) {
+                    any_match = true;
+                    break;
+                }
+            }
+            Ok(Value::Bool(if *negated { !any_match } else { any_match }))
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let v = eval_in_group(expr, group)?;
+            let lo = eval_in_group(low, group)?;
+            let hi = eval_in_group(high, group)?;
+            let in_range = v.cmp_for_order(&lo) != std::cmp::Ordering::Less
+                && v.cmp_for_order(&hi) != std::cmp::Ordering::Greater;
+            Ok(Value::Bool(if *negated { !in_range } else { in_range }))
+        }
+        Expr::IsNull { expr, negated } => {
+            let v = eval_in_group(expr, group)?;
+            let b = v.is_null();
+            Ok(Value::Bool(if *negated { !b } else { b }))
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
+            let v = eval_in_group(expr, group)?;
+            let p = eval_in_group(pattern, group)?;
+            let s = match v {
+                Value::String(s) => s,
+                Value::Null => return Ok(Value::Bool(false)),
+                other => {
+                    return Err(EvalError::TypeMismatch(format!(
+                        "LIKE left operand must be string, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let pat = match p {
+                Value::String(s) => s,
+                other => {
+                    return Err(EvalError::TypeMismatch(format!(
+                        "LIKE pattern must be string, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let matched = like_match(&s, &pat);
+            Ok(Value::Bool(if *negated { !matched } else { matched }))
+        }
+    }
+}
+
+fn first_row_ctx<'a>(group: &'a Group<'a>) -> Result<RowCtx<'a>, EvalError> {
+    let note = group
+        .notes
+        .first()
+        .copied()
+        .ok_or_else(|| EvalError::TypeMismatch("empty group".to_string()))?;
+    Ok(RowCtx::new(note))
 }
 
 fn load_source_rows(
@@ -377,9 +708,18 @@ pub(crate) fn eval_expr(expr: &Expr, ctx: &RowCtx<'_>) -> Result<Value, EvalErro
             let matched = like_match(&s, &pat);
             Ok(Value::Bool(if *negated { !matched } else { matched }))
         }
-        Expr::Function { name, .. } => {
-            // Commit 2 wires the function registry. For now, unknown.
-            Err(EvalError::UnknownFunction(name.clone()))
+        Expr::Function { name, args } => {
+            if functions::is_aggregate(name) {
+                return Err(EvalError::TypeMismatch(format!(
+                    "aggregate {} not allowed outside GROUP BY / aggregate SELECT",
+                    name.to_ascii_uppercase()
+                )));
+            }
+            let values: Vec<Value> = args
+                .iter()
+                .map(|a| eval_expr(a, ctx))
+                .collect::<Result<_, _>>()?;
+            functions::call_scalar(name, &values)
         }
     }
 }

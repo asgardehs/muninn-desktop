@@ -13,6 +13,7 @@
 
 pub mod ast;
 pub mod eval;
+pub mod functions;
 pub mod parser;
 pub mod value;
 

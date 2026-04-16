@@ -5,7 +5,7 @@ description:
   with React frontend, replacing the Go CLI + LSP architecture. mdbase
   specification adopted from the start.
 doc_date: 2026-04-15
-doc_rev_date:
+doc_rev_date: 2026-04-16
 supersedes: design-doc.md
 written_by: Adam Bick
 ---
@@ -32,7 +32,7 @@ foundation, not bolted on later.
   searching, and querying notes
 - **Folder wikilinks** — `[[folder/]]` links to directories, folders as
   first-class nodes in the link graph with optional `_index.md` metadata
-- **Runestones** — relational document views over the vault (Obsidian Runestones-style
+- **Runestones** — relational document views over the vault (Obsidian Bases-style
   spreadsheet interface over typed markdown)
 - **Embedded scripting** — Rhai script blocks inside notes for custom queries,
   computed data, and dynamic content. No plugins needed.
@@ -42,6 +42,9 @@ foundation, not bolted on later.
   EPUB) with full Quarto (.qmd) support for computational documents
 - **Grammar & spell checking** — harper-core embedded in the binary, real-time
   checking with vault-local custom dictionary
+- **Zotero integration** — search Zotero library, export BibTeX/CSL
+  bibliographies, citation picker in the editor via Zotero's HTTP citing
+  protocol. Pandoc citation syntax (`[@citekey]`) throughout.
 - **Internal API** — HTTP API for programmatic access from other Asgard tools
   (Huginn, Odin, scripts). Not a plugin ecosystem — internal use only.
 - **CLI** — `muninn` binary for terminal workflows (create, search, query,
@@ -83,6 +86,7 @@ Wikilinks still work. No database, no cloud.
 │  │  │  scripting/ — Rhai engine + vault API │  │  │
 │  │  │  export/    — pandoc + Quarto pipeline│  │  │
 │  │  │  grammar/   — harper-core checker    │  │  │
+│  │  │  zotero/    — citation management    │  │  │
 │  │  │  watch/     — file system events      │  │  │
 │  │  │  api/       — HTTP server (axum)      │  │  │
 │  │  └───────────────────────────────────────┘  │  │
@@ -106,7 +110,7 @@ Four crates in a Cargo workspace:
 
 | Crate | Type | Purpose |
 |---|---|---|
-| `muninn-core` | lib | All domain logic — vault, mdbase, query, runestones, scripting, export, grammar, wikilinks, markdown, API |
+| `muninn-core` | lib | All domain logic — vault, mdbase, query, runestones, scripting, export, grammar, zotero, wikilinks, markdown, API |
 | `muninn-tauri` | bin | Tauri app — commands, window management, React frontend |
 | `muninn-cli` | bin | Terminal interface — clap commands calling into core |
 | `muninn-server` | bin | Standalone HTTP API server (for headless/service use) |
@@ -150,7 +154,8 @@ muninn/
 │   │       │   ├── ast.rs        # internal query representation
 │   │       │   ├── eval.rs       # query execution against vault
 │   │       │   ├── functions.rs  # built-in SQL functions
-│   │       │   └── computed.rs   # computed field evaluation
+│   │       │   ├── value.rs      # typed query Value (SQL semantics)
+│   │       │   └── computed.rs   # computed field evaluation (Phase 5)
 │   │       ├── runestones/
 │   │       │   ├── mod.rs
 │   │       │   ├── runestone.rs   # Runestone definition, column config
@@ -187,6 +192,11 @@ muninn/
 │   │       │   ├── mod.rs
 │   │       │   ├── checker.rs    # harper-core integration, diagnostic mapping
 │   │       │   └── dictionary.rs # vault-local custom dictionary management
+│   │       ├── zotero/
+│   │       │   ├── mod.rs
+│   │       │   ├── client.rs     # HTTP client for Zotero Web API v3 + local server
+│   │       │   ├── types.rs      # ZoteroItem, Creator, Citation key types
+│   │       │   └── picker.rs     # citation picker protocol (HTTP citing)
 │   │       └── watch/
 │   │           └── mod.rs        # file system watcher (notify crate)
 │   ├── muninn-cli/
@@ -199,6 +209,7 @@ muninn/
 │   │       ├── cmd_type.rs       # type list/show
 │   │       ├── cmd_validate.rs   # note validation
 │   │       ├── cmd_export.rs     # export to PDF, HTML, DOCX, etc.
+│   │       ├── cmd_cite.rs       # Zotero citation search, export
 │   │       ├── cmd_init.rs       # vault setup
 │   │       └── cmd_backfill.rs   # default/generated field backfill
 │   ├── muninn-server/
@@ -365,20 +376,49 @@ SQL query language over frontmatter fields, using `sqlparser-rs`.
 
 ```rust
 pub fn parse_query(sql: &str) -> Result<MuninnQuery>;
-pub fn execute(vault: &Vault, query: &MuninnQuery) -> Result<QueryResultSet>;
+pub fn execute(
+    vault_root: &Path,
+    types: &HashMap<String, TypeDef>,
+    config: Option<&MdbaseConfig>,
+    query: &MuninnQuery,
+) -> Result<QueryResultSet>;
+
+// Convenience wrapper on Vault
+impl Vault {
+    pub fn query(&self, sql: &str) -> Result<QueryResultSet>;
+}
 ```
 
 `sqlparser-rs` parses standard SQL into an AST. The `parser` module validates
-that only supported clauses are used (SELECT, FROM, WHERE, JOIN, GROUP BY,
-HAVING, ORDER BY, LIMIT/OFFSET) and rejects DDL, DML, and subqueries.
+that only supported clauses are used (SELECT, FROM, WHERE, GROUP BY, HAVING,
+ORDER BY, LIMIT/OFFSET) and rejects DDL, DML, CTEs, UNION, and subqueries.
 
-The evaluator resolves FROM to type(s), walks matching files, evaluates WHERE
-against frontmatter, applies GROUP BY/HAVING, sorts, paginates, and projects
-selected fields. Built-in functions (TODAY, NOW, COUNT, LENGTH, LOWER, UPPER,
-COALESCE, DATE_ADD, EXISTS) are registered in a function table.
+**FROM sources:** a single type name (matched via `mdbase::match_type`), or
+the synthetic `note` source — `FROM note` selects every note in the vault
+regardless of type.
 
-Resource limits: max result set size, evaluation timeout, nesting depth limit
-for expressions.
+The evaluator resolves FROM to matching notes, filters with WHERE, applies
+GROUP BY/HAVING for aggregate queries, sorts (with projection-alias resolution
+in ORDER BY), paginates, and projects selected fields. Built-in functions
+(TODAY, NOW, YEAR, LENGTH, LOWER, UPPER, COALESCE, DATE_ADD, EXISTS) are
+scalar; COUNT, SUM, AVG, MIN, MAX are aggregates.
+
+A dedicated `query::Value` enum (distinct from `serde_yaml::Value`) gives the
+evaluator real SQL semantics: tagged Date/DateTime values, integer/float
+split, NULL-aware comparison. The round-trip is YAML → `Value` for evaluation,
+`Value` → JSON for API/CLI output, `Value` → YAML for Runestone writeback
+(Phase 5).
+
+**JOINs** are deferred to Phase 5 where link-field semantics arrive with
+Runestones. Until then the parser returns a clear error pointing to Phase 5.
+
+**Computed fields** are introduced in Phase 5 alongside Runestone virtual
+columns — the `computed.rs` module is a placeholder until `TypeDef` gains a
+`computed:` map.
+
+Resource limits: max result set size (10,000 rows), expression nesting depth
+(32 levels). Evaluation timeout arrives alongside the persistent cache in
+Phase 9.
 
 ### wikilink module
 
@@ -1029,6 +1069,178 @@ grammar:
   disabled_rules: []            # specific harper rules to suppress
 ```
 
+### zotero module
+
+Citation management via Zotero integration. Muninn talks to Zotero through two
+official APIs — the Web API v3 for library access and the local HTTP citing
+protocol for interactive citation insertion. No direct SQLite access (Zotero
+docs explicitly warn against it — schema changes between releases and writes
+corrupt the database).
+
+This module is designed against **Zotero 9.0** (April 2026) but targets stable
+APIs that work across Zotero 7, 8, and 9. The Web API v3 has been stable since
+2022. The HTTP citing protocol on port 23119 has been the official integration
+path since Zotero 6.0 (used by the Google Docs plugin).
+
+**Two integration paths:**
+
+| Path | Endpoint | Auth | Use Case |
+|---|---|---|---|
+| Web API v3 | `https://api.zotero.org` | API key via `Zotero-API-Key` header | Search library, export BibTeX/CSL-JSON, read items |
+| HTTP Citing Protocol | `http://127.0.0.1:23119/connector/document/*` | None (localhost only) | Interactive citation picker in desktop app |
+
+**Web API v3 — library access:**
+
+The primary integration for CLI and export workflows. Zotero's REST API
+supports searching items, retrieving metadata, and exporting in all standard
+formats:
+
+- `bibtex`, `biblatex` — for pandoc `--bibliography`
+- `csljson` — Citation Style Language JSON, for programmatic citation data
+- `ris`, `mods`, `tei` — additional academic formats
+
+Items are accessed via user or group library URLs:
+
+```
+GET /users/<userID>/items?q=<search>&format=bibtex
+GET /users/<userID>/items/<itemKey>?format=csljson
+GET /users/<userID>/items?tag=<tag>&format=bibtex
+```
+
+Authentication uses an API key created in Zotero account settings. The key is
+stored in `.muninn/config.yaml` (vault-portable) or app config (machine-local).
+
+**HTTP Citing Protocol — interactive picker:**
+
+For the Tauri desktop app, the HTTP citing protocol lets Muninn trigger
+Zotero's native citation dialog. The flow is a transaction-based exchange:
+
+1. Muninn sends `POST /connector/document/execCommand` with
+   `{"command": "addEditCitation", "docId": "<noteId>"}`
+2. Zotero responds with commands (get document state, show picker)
+3. Muninn responds to each command via `POST /connector/document/respond`
+4. Transaction completes when Zotero issues `Document.complete`
+
+This is the same protocol Google Docs uses. Muninn implements it as a document
+processor — the note is the "document", citations are inserted as pandoc-style
+`[@citekey]` references.
+
+**Citation syntax in notes:**
+
+Muninn uses pandoc citation syntax — the same format Quarto and pandoc expect:
+
+- `[@smith2024]` — single citation
+- `[@smith2024; @jones2023]` — multiple citations
+- `[@smith2024, p. 42]` — citation with locator
+- `[see @smith2024, pp. 33-35; also @jones2023, ch. 1]` — complex citation
+
+These are plain text in the markdown body. They render through pandoc/Quarto
+during export with the appropriate `--bibliography` and `--csl` flags.
+
+**What the module provides:**
+
+```rust
+pub struct ZoteroClient {
+    api_key: Option<String>,
+    user_id: Option<String>,
+    base_url: String,            // https://api.zotero.org (configurable)
+    local_port: u16,             // 23119 (default)
+}
+
+pub struct ZoteroItem {
+    pub key: String,             // Zotero item key
+    pub item_type: String,       // book, journalArticle, thesis, etc.
+    pub title: String,
+    pub creators: Vec<Creator>,
+    pub date: Option<String>,
+    pub abstract_text: Option<String>,
+    pub tags: Vec<String>,
+    pub cite_key: Option<String>, // Better BibTeX key if available
+}
+
+pub struct Creator {
+    pub creator_type: String,    // author, editor, translator, etc.
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub name: Option<String>,    // for institutional authors
+}
+
+impl ZoteroClient {
+    pub fn new(config: &ZoteroConfig) -> Self;
+    pub async fn search(&self, query: &str) -> Result<Vec<ZoteroItem>>;
+    pub async fn get_item(&self, key: &str) -> Result<ZoteroItem>;
+    pub async fn export_bibliography(&self, keys: &[&str], format: BibFormat) -> Result<String>;
+    pub async fn export_collection(&self, collection: &str, format: BibFormat) -> Result<String>;
+    pub fn is_local_available(&self) -> bool;  // ping port 23119
+}
+
+pub enum BibFormat {
+    BibTeX,
+    BibLaTeX,
+    CslJson,
+    Ris,
+}
+```
+
+**Integration with the export pipeline:**
+
+The export module's `ExportOptions.bibliography` field currently expects a file
+path. With Zotero integration, this gains a second mode:
+
+- `bibliography: "refs.bib"` — existing behavior, local file
+- `bibliography: "zotero:collection/My Research"` — pull from Zotero on export
+- `bibliography: "zotero:items"` — export all cited items (scan note for `[@...]`)
+
+When a note is exported and bibliography is set to a Zotero source, the export
+pipeline calls `ZoteroClient::export_bibliography()` to generate a temporary
+`.bib` file, then passes it to pandoc/Quarto.
+
+**Integration with the desktop app:**
+
+In the Tauri GUI:
+
+- `Ctrl+Shift+Z` — open citation picker (triggers HTTP citing protocol)
+- Citation autocomplete in CodeMirror: typing `[@` shows suggestions from
+  Zotero search
+- Bibliography panel in sidebar: browse Zotero collections, drag-and-drop
+  citations
+- Export dialog: "Pull bibliography from Zotero" checkbox
+
+**CLI commands:**
+
+```bash
+muninn cite search "smith 2024"              # search Zotero library
+muninn cite export --format bibtex           # export all cited items as .bib
+muninn cite export --collection "My Research" --format biblatex
+muninn cite key smith2024                    # look up a specific citation key
+```
+
+**Configuration:**
+
+Zotero settings in `.muninn/config.yaml`:
+
+```yaml
+zotero:
+  enabled: true
+  api_key: "P9NiFoyLeZu2bZNvvuQPDWsd"  # from zotero.org/settings/keys
+  user_id: "12345678"                    # Zotero user ID
+  local_port: 23119                      # default Zotero connector port
+  default_format: bibtex                 # bibtex | biblatex | csljson
+```
+
+The API key and user ID are required for Web API access. Local HTTP citing
+(port 23119) works without authentication — it only requires Zotero to be
+running on the same machine.
+
+**What Zotero integration is NOT:**
+
+- Not a Zotero replacement — Muninn manages notes, Zotero manages references
+- Not a sync mechanism — Muninn pulls from Zotero on demand, doesn't cache
+- Not a Zotero plugin — Muninn is a client of Zotero's APIs, not an extension
+  that runs inside Zotero
+- Not required — Zotero integration is optional. Notes with `[@citekey]`
+  syntax work with any `.bib` file, Zotero just makes sourcing them easier
+
 ### runestones module
 
 Runestones are relational document views over the vault — a spreadsheet interface
@@ -1565,6 +1777,12 @@ muninn lint                          # all notes
 muninn lint path/to/note.md          # single note
 muninn lint --type design-doc        # by type
 
+# Citations (Zotero integration)
+muninn cite search "smith 2024"                              # search Zotero library
+muninn cite export --format bibtex                           # export cited items as .bib
+muninn cite export --collection "My Research" --format biblatex
+muninn cite key smith2024                                    # look up a citation key
+
 # Maintenance
 muninn backfill --type note --field id --dry-run
 muninn init
@@ -1638,6 +1856,7 @@ Tauri app settings.
 | `harper-core` | Grammar + spell checking engine | — |
 | `axum` | HTTP API server | — |
 | `tower-http` | CORS, logging middleware | — |
+| `reqwest` | HTTP client for Zotero Web API + local server | — |
 
 ### Rust (muninn-cli)
 
@@ -1683,23 +1902,28 @@ does not affect CLI behavior.
 |---|---|---|
 | 1 | `muninn-core` — vault, markdown, wikilink (with folder links + attachments), mdbase (types + validation), grammar (harper-core) | Library with full vault operations, type system, folder wikilinks, attachment linking, and grammar checking |
 | 2 | `muninn-cli` — clap commands over core | Working CLI, feature parity with Go version + mdbase + folder links |
-| 3 | `muninn-core` — query module (SQL parser + evaluator) | Structured queries via CLI |
+| 3 | `muninn-core` — query module (SQL parser + evaluator, `Vault::query`, CLI `muninn query`) | Structured queries via CLI; JOINs and `computed:` fields deferred to Phase 5 |
 | 4 | `muninn-core` — scripting module (Rhai engine + vault API) | Inline script blocks, CLI `muninn run` / `muninn render` |
 | 5 | `muninn-core` — runestones module + API (axum) | Relational views + HTTP access for Asgard tools |
-| 6 | `muninn-core` — export module (pandoc + Quarto pipeline) | Document export via CLI, `.qmd` as a note type |
-| 7 | `muninn-tauri` — Tauri shell + React frontend (editor, search, list) | Desktop app MVP with script blocks, attachment embeds, export button |
+| 6 | `muninn-core` — export module (pandoc + Quarto pipeline) + zotero module (Web API v3 + HTTP citing) | Document export via CLI, `.qmd` as a note type, Zotero citation search + bibliography export |
+| 7 | `muninn-tauri` — Tauri shell + React frontend (editor, search, list) | Desktop app MVP with script blocks, attachment embeds, export button, citation picker |
 | 8 | `muninn-tauri` — Runestones view, graph view (with folders), query UI, type manager | Full desktop feature set |
 | 9 | `muninn-core` — file watching, persistent cache | Live updates, large vault performance |
 | 10 | `muninn-core` — migrations, backfill, path patterns | Schema evolution tooling |
 
 Phases 1–2 validate the Rust port with folder wikilinks and attachments built
-in from day one. Phase 3 adds the query engine. Phase 4 adds scripting on top
-of the query engine — scripts need `query()` to be useful. Phase 5 builds
+in from day one. Phase 3 adds the query engine (SELECT, WHERE, GROUP BY,
+HAVING, ORDER BY, LIMIT/OFFSET, scalar + aggregate built-ins); JOINs and
+`TypeDef.computed` fields ride along with Runestones in Phase 5. Phase 4 adds
+scripting on top of the query engine — scripts need `query()` to be useful. Phase 5 builds
 Runestones and the API — this is where Muninn becomes useful to the rest of the
 Asgard ecosystem, even before the GUI exists. Phase 6 adds export — the
 pipeline depends on scripting (to evaluate script blocks before export) and
-the vault (to resolve links and attachments). Phases 7–8 build the desktop
-app. Phases 9–10 round out the feature set.
+the vault (to resolve links and attachments). Zotero ships with export because
+citations feed into the bibliography pipeline — `[@citekey]` in notes,
+`.bib` from Zotero, pandoc renders the references. The HTTP citing protocol
+(citation picker) lights up in Phase 7 when the desktop app arrives.
+Phases 7–8 build the desktop app. Phases 9–10 round out the feature set.
 
 The API ships before the desktop app. This means Huginn and scripts can start
 consuming Muninn data as soon as the core + API are working, without waiting
@@ -1743,6 +1967,7 @@ Go version is retired when the Rust version reaches feature parity.
 | Text search only | Text search + SQL queries |
 | VS Code extension required | No extension needed |
 | Standalone tool | Integrated into Asgard ecosystem via API |
+| No citation management | Zotero integration — search library, export `.bib`, citation picker in editor |
 | ~6 Go dependencies | Rust crate ecosystem |
 
 ## Relationship to Asgard Ecosystem

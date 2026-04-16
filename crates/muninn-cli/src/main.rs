@@ -40,7 +40,7 @@ enum Command {
     Validate(cmd_validate::ValidateArgs),
     /// Grammar and spell check
     Lint(cmd_lint::LintArgs),
-    /// Run SQL queries over notes (not yet implemented)
+    /// Run SQL queries over notes
     Query(cmd_query::QueryArgs),
     /// Export notes to PDF, HTML, DOCX, etc. (not yet implemented)
     Export(cmd_export::ExportArgs),
@@ -87,7 +87,10 @@ fn main() {
             let vault_path = resolve_vault_path();
             cmd_lint::run(args, &vault_path, cli.json)
         }
-        Command::Query(args) => cmd_query::run(args),
+        Command::Query(args) => {
+            let vault_path = resolve_vault_path();
+            cmd_query::run(args, &vault_path, cli.json)
+        }
         Command::Export(args) => cmd_export::run(args),
         Command::Backfill(args) => cmd_backfill::run(args),
     };
