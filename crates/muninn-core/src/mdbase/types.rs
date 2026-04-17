@@ -11,6 +11,12 @@ pub struct TypeDef {
     pub extends: Option<String>,
     #[serde(default)]
     pub fields: IndexMap<String, FieldDef>,
+    /// Computed fields: SQL expressions evaluated against the note's
+    /// frontmatter (plus synthetic columns) on read. Keyed by virtual field
+    /// name. The expression string is parsed on first query execution and
+    /// cached per-`execute` call; parse errors surface as query errors.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub computed: IndexMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict: Option<StrictMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +39,24 @@ impl TypeDef {
     /// Returns resolved fields if available, otherwise declared fields.
     pub fn effective_fields(&self) -> &IndexMap<String, FieldDef> {
         self.resolved_fields.as_ref().unwrap_or(&self.fields)
+    }
+}
+
+impl Default for TypeDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: None,
+            extends: None,
+            fields: IndexMap::new(),
+            computed: IndexMap::new(),
+            strict: None,
+            r#match: None,
+            path_pattern: None,
+            display_name_key: None,
+            resolved_fields: None,
+            body: String::new(),
+        }
     }
 }
 
@@ -174,8 +198,8 @@ pub struct WhereCond {
 
 /// Valid field type strings.
 pub const VALID_FIELD_TYPES: &[&str] = &[
-    "string", "integer", "number", "boolean", "date", "datetime", "time",
-    "enum", "list", "object", "link", "any",
+    "string", "integer", "number", "boolean", "date", "datetime", "time", "enum", "list", "object",
+    "link", "any",
 ];
 
 pub fn is_valid_field_type(t: &str) -> bool {

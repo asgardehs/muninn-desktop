@@ -1,33 +1,55 @@
 //! Query execution against a vault.
 //!
-//! The evaluator walks notes matching the FROM clause, filters with WHERE,
-//! projects SELECT columns, applies ORDER BY, and paginates via LIMIT/OFFSET.
-//! Commit 2 of Phase 3 extends this with GROUP BY/HAVING and built-in
-//! functions.
+//! The evaluator walks notes matching the FROM clause, joins them per the
+//! JOIN list (Phase 5), filters with WHERE, optionally GROUP BYs with
+//! aggregates, projects SELECT columns, applies ORDER BY, and paginates via
+//! LIMIT/OFFSET.
+//!
+//! A tuple is `Vec<Option<&Note>>`: one binding per alias in the FROM clause.
+//! Single-source queries use tuples of length 1. LEFT JOIN bindings are
+//! `None` when no right-side match was found — qualified references against a
+//! `None` binding resolve to `Value::Null`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::markdown::{self, Note};
 use crate::mdbase::match_type::match_types;
+use crate::mdbase::types::TypeDef;
 
-use super::ast::{BinaryOp, Expr, MuninnQuery, OrderBy, Projection, SortOrder, UnaryOp};
+use super::ast::{
+    BinaryOp, Expr, FromClause, JoinKind, MuninnQuery, OrderBy, Projection, SortOrder, UnaryOp,
+};
 use super::functions;
 use super::value::Value;
 use super::{ANY_TYPE_SOURCE, MAX_RESULT_ROWS};
+
+/// Maximum recursion depth when resolving computed fields.
+pub const MAX_COMPUTED_DEPTH: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum EvalError {
     #[error("unknown type: {0}")]
     UnknownType(String),
+    #[error("unknown alias: {0}")]
+    UnknownAlias(String),
     #[error("type mismatch in expression: {0}")]
     TypeMismatch(String),
     #[error("unknown function: {0}")]
     UnknownFunction(String),
     #[error("result set exceeds max rows ({0})")]
     ResultTooLarge(usize),
+    #[error("computed field '{0}' recurses too deeply")]
+    ComputedTooDeep(String),
+    #[error("computed field '{field}' parse error: {source}")]
+    ComputedParse {
+        field: String,
+        #[source]
+        source: super::parser::ParseError,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
@@ -49,29 +71,70 @@ pub struct QueryResultSet {
     pub rows: Vec<QueryResultRow>,
 }
 
+/// Cache of parsed computed-field expressions keyed by type name → field
+/// name. Built once per `execute` call so each type's `computed:` map only
+/// parses its SQL snippets once.
+pub(crate) type ComputedCache = HashMap<String, IndexMap<String, Expr>>;
+
+fn build_computed_cache(types: &HashMap<String, TypeDef>) -> Result<ComputedCache, EvalError> {
+    let mut cache: ComputedCache = HashMap::new();
+    for (tn, td) in types {
+        if td.computed.is_empty() {
+            continue;
+        }
+        let mut parsed = IndexMap::new();
+        for (field, raw) in &td.computed {
+            let expr = super::parser::parse_expr(raw).map_err(|e| EvalError::ComputedParse {
+                field: format!("{tn}.{field}"),
+                source: e,
+            })?;
+            parsed.insert(field.clone(), expr);
+        }
+        cache.insert(tn.clone(), parsed);
+    }
+    Ok(cache)
+}
+
 /// Execute a parsed query against a vault rooted at `vault_root`.
-///
-/// Kept standalone (no `&Vault` reference) so the evaluator can be reused by
-/// tests and by future Runestone materialization without pulling in the full
-/// `Vault` surface.
 pub fn execute(
     vault_root: &Path,
-    types: &HashMap<String, crate::mdbase::types::TypeDef>,
+    types: &HashMap<String, TypeDef>,
     config: Option<&crate::mdbase::config::MdbaseConfig>,
     query: &MuninnQuery,
 ) -> Result<QueryResultSet, EvalError> {
-    let source = load_source_rows(vault_root, types, config, &query.from)?;
+    let computed = build_computed_cache(types)?;
 
-    let filtered: Vec<Note> = match &query.filter {
-        Some(expr) => source
-            .into_iter()
-            .filter_map(|n| match eval_predicate(expr, &RowCtx::new(&n)) {
-                Ok(true) => Some(Ok(n)),
-                Ok(false) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        None => source,
+    // Load per-alias note pools.
+    let mut per_alias: Vec<Vec<Note>> = Vec::with_capacity(1 + query.from.joins.len());
+    per_alias.push(load_source_rows(
+        vault_root,
+        types,
+        config,
+        &query.from.primary.type_name,
+    )?);
+    for j in &query.from.joins {
+        per_alias.push(load_source_rows(
+            vault_root,
+            types,
+            config,
+            &j.right.type_name,
+        )?);
+    }
+
+    let tuples = build_join_tuples(&per_alias, &query.from, types, &computed, vault_root)?;
+
+    let filtered: Vec<Vec<Option<&Note>>> = match &query.filter {
+        Some(expr) => {
+            let mut out = Vec::with_capacity(tuples.len());
+            for t in &tuples {
+                let ctx = RowCtx::new(&query.from, t, types, &computed, vault_root);
+                if eval_predicate(expr, &ctx)? {
+                    out.push(t.clone());
+                }
+            }
+            out
+        }
+        None => tuples,
     };
 
     let columns = resolve_columns(&query.projections);
@@ -81,9 +144,9 @@ pub fn execute(
         || projections_have_aggregate(&query.projections);
 
     let mut rows = if grouped {
-        execute_grouped(&filtered, query, vault_root)?
+        execute_grouped(&filtered, query, types, &computed, vault_root)?
     } else {
-        execute_simple(&filtered, query, vault_root)?
+        execute_simple(&filtered, query, types, &computed, vault_root)?
     };
 
     apply_pagination(&mut rows, query.offset, query.limit);
@@ -95,15 +158,71 @@ pub fn execute(
     Ok(QueryResultSet { columns, rows })
 }
 
+fn build_join_tuples<'a>(
+    per_alias: &'a [Vec<Note>],
+    from: &FromClause,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
+    vault_root: &Path,
+) -> Result<Vec<Vec<Option<&'a Note>>>, EvalError> {
+    let alias_count = 1 + from.joins.len();
+
+    // Seed with one tuple per primary row; pad with Nones for later aliases
+    // so RowCtx indexing stays uniform while we evaluate each ON predicate.
+    let mut tuples: Vec<Vec<Option<&Note>>> = per_alias[0]
+        .iter()
+        .map(|n| {
+            let mut v: Vec<Option<&Note>> = Vec::with_capacity(alias_count);
+            v.push(Some(n));
+            for _ in 1..alias_count {
+                v.push(None);
+            }
+            v
+        })
+        .collect();
+
+    for (j_idx, join) in from.joins.iter().enumerate() {
+        let right_alias_idx = j_idx + 1;
+        let right_notes = &per_alias[right_alias_idx];
+        let mut next: Vec<Vec<Option<&Note>>> = Vec::new();
+
+        for t in &tuples {
+            let mut matched = false;
+            for rn in right_notes {
+                let mut candidate = t.clone();
+                candidate[right_alias_idx] = Some(rn);
+                let ctx = RowCtx::new(from, &candidate, types, computed, vault_root);
+                if eval_predicate(&join.on, &ctx)? {
+                    next.push(candidate);
+                    matched = true;
+                }
+            }
+            if !matched && join.kind == JoinKind::Left {
+                let mut left = t.clone();
+                left[right_alias_idx] = None;
+                next.push(left);
+            }
+        }
+
+        tuples = next;
+    }
+
+    Ok(tuples)
+}
+
 fn execute_simple(
-    filtered: &[Note],
+    filtered: &[Vec<Option<&Note>>],
     query: &MuninnQuery,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
     vault_root: &Path,
 ) -> Result<Vec<QueryResultRow>, EvalError> {
-    let mut rows: Vec<QueryResultRow> = filtered
-        .iter()
-        .map(|n| project_row(n, &query.projections, vault_root))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows: Vec<QueryResultRow> = Vec::with_capacity(filtered.len());
+    for t in filtered {
+        let ctx = RowCtx::new(&query.from, t, types, computed, vault_root);
+        rows.push(project_row(&ctx, &query.projections, vault_root)?);
+    }
+
     let resolved_order: Vec<OrderBy> = query
         .order_by
         .iter()
@@ -112,13 +231,19 @@ fn execute_simple(
             order: ob.order,
         })
         .collect();
-    apply_order_by(&mut rows, &resolved_order, filtered, vault_root)?;
+
+    apply_order_by(
+        &mut rows,
+        filtered,
+        &resolved_order,
+        &query.from,
+        types,
+        computed,
+        vault_root,
+    )?;
     Ok(rows)
 }
 
-/// If `expr` is a bare column reference matching a projection alias, swap it
-/// for the underlying projection expression. Standard SQL behavior for
-/// ORDER BY clauses.
 fn resolve_alias(expr: &Expr, projections: &[Projection]) -> Expr {
     if let Expr::Column(name) = expr {
         for p in projections {
@@ -135,29 +260,31 @@ fn resolve_alias(expr: &Expr, projections: &[Projection]) -> Expr {
     expr.clone()
 }
 
-/// GROUP BY + aggregate execution path.
-///
-/// Rows are bucketed by the values of each GROUP BY expression. Non-aggregate
-/// projection parts evaluate in the first row of the group; aggregate function
-/// calls fold the argument across all rows in the group. HAVING filters whole
-/// groups. ORDER BY evaluates against the same group context.
 fn execute_grouped(
-    filtered: &[Note],
+    filtered: &[Vec<Option<&Note>>],
     query: &MuninnQuery,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
     vault_root: &Path,
 ) -> Result<Vec<QueryResultRow>, EvalError> {
-    // One big group when GROUP BY is absent but aggregates are present (i.e.
-    // `SELECT COUNT(*) FROM note` with no GROUP BY).
-    let groups = build_groups(filtered, &query.group_by)?;
+    let groups = build_groups(
+        filtered,
+        &query.group_by,
+        &query.from,
+        types,
+        computed,
+        vault_root,
+    )?;
 
     let mut rows: Vec<(Vec<Value>, QueryResultRow)> = Vec::with_capacity(groups.len());
     for group in &groups {
-        if group.notes.is_empty() {
+        if group.tuples.is_empty() {
             continue;
         }
 
         if let Some(expr) = &query.having {
-            let keep = eval_in_group(expr, group)?.is_truthy();
+            let keep =
+                eval_in_group(expr, group, &query.from, types, computed, vault_root)?.is_truthy();
             if !keep {
                 continue;
             }
@@ -172,20 +299,35 @@ fn execute_grouped(
                     ));
                 }
                 Projection::Expr { expr, .. } => {
-                    cells.push(eval_in_group(expr, group)?);
+                    cells.push(eval_in_group(
+                        expr,
+                        group,
+                        &query.from,
+                        types,
+                        computed,
+                        vault_root,
+                    )?);
                 }
             }
         }
 
-        // ORDER BY keys evaluated in the same group context; resolve aliases
-        // so `ORDER BY my_alias` works when `my_alias` names a projection.
         let sort_keys: Vec<Value> = query
             .order_by
             .iter()
-            .map(|ob| eval_in_group(&resolve_alias(&ob.expr, &query.projections), group))
+            .map(|ob| {
+                eval_in_group(
+                    &resolve_alias(&ob.expr, &query.projections),
+                    group,
+                    &query.from,
+                    types,
+                    computed,
+                    vault_root,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let first_note = group.notes[0];
+        let first_tuple = group.tuples[0];
+        let first_note = first_tuple[0].expect("primary binding always present");
         let rel = first_note
             .path
             .strip_prefix(vault_root)
@@ -221,35 +363,38 @@ fn execute_grouped(
 
 struct Group<'a> {
     key: Vec<Value>,
-    notes: Vec<&'a Note>,
+    tuples: Vec<&'a [Option<&'a Note>]>,
 }
 
 fn build_groups<'a>(
-    filtered: &'a [Note],
+    filtered: &'a [Vec<Option<&'a Note>>],
     group_by: &[Expr],
+    from: &FromClause,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
+    vault_root: &Path,
 ) -> Result<Vec<Group<'a>>, EvalError> {
     if group_by.is_empty() {
-        // Single synthetic group holding every filtered row.
         return Ok(vec![Group {
             key: Vec::new(),
-            notes: filtered.iter().collect(),
+            tuples: filtered.iter().map(|t| t.as_slice()).collect(),
         }]);
     }
 
     let mut groups: Vec<Group<'a>> = Vec::new();
-    for note in filtered {
-        let ctx = RowCtx::new(note);
+    for tuple in filtered {
+        let ctx = RowCtx::new(from, tuple, types, computed, vault_root);
         let key: Vec<Value> = group_by
             .iter()
             .map(|e| eval_expr(e, &ctx))
             .collect::<Result<Vec<_>, _>>()?;
 
         if let Some(existing) = groups.iter_mut().find(|g| keys_equal(&g.key, &key)) {
-            existing.notes.push(note);
+            existing.tuples.push(tuple.as_slice());
         } else {
             groups.push(Group {
                 key,
-                notes: vec![note],
+                tuples: vec![tuple.as_slice()],
             });
         }
     }
@@ -261,7 +406,6 @@ fn keys_equal(a: &[Value], b: &[Value]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).all(|(x, y)| {
-        // NULL group keys match each other in GROUP BY semantics.
         if x.is_null() && y.is_null() {
             return true;
         }
@@ -290,14 +434,19 @@ fn expr_has_aggregate(expr: &Expr) -> bool {
             expr, low, high, ..
         } => expr_has_aggregate(expr) || expr_has_aggregate(low) || expr_has_aggregate(high),
         Expr::IsNull { expr, .. } => expr_has_aggregate(expr),
-        Expr::Like { expr, pattern, .. } => {
-            expr_has_aggregate(expr) || expr_has_aggregate(pattern)
-        }
-        Expr::Literal(_) | Expr::Column(_) => false,
+        Expr::Like { expr, pattern, .. } => expr_has_aggregate(expr) || expr_has_aggregate(pattern),
+        Expr::Literal(_) | Expr::Column(_) | Expr::QualifiedColumn { .. } => false,
     }
 }
 
-fn eval_in_group(expr: &Expr, group: &Group<'_>) -> Result<Value, EvalError> {
+fn eval_in_group(
+    expr: &Expr,
+    group: &Group<'_>,
+    from: &FromClause,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
+    vault_root: &Path,
+) -> Result<Value, EvalError> {
     match expr {
         Expr::Function { name, args } if functions::is_aggregate(name) => {
             if args.len() != 1 {
@@ -308,52 +457,53 @@ fn eval_in_group(expr: &Expr, group: &Group<'_>) -> Result<Value, EvalError> {
             }
             let is_star = matches!(&args[0], Expr::Column(s) if s == "*");
             let per_row: Vec<Value> = if is_star {
-                group.notes.iter().map(|_| Value::Null).collect()
+                group.tuples.iter().map(|_| Value::Null).collect()
             } else {
                 group
-                    .notes
+                    .tuples
                     .iter()
-                    .map(|n| eval_expr(&args[0], &RowCtx::new(n)))
+                    .map(|t| {
+                        let ctx = RowCtx::new(from, t, types, computed, vault_root);
+                        eval_expr(&args[0], &ctx)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             };
             functions::fold_aggregate(name, &per_row, is_star)
         }
         Expr::Function { name, args } => {
-            // Non-aggregate function call inside group context — fall back to
-            // scalar evaluation using the first row.
             let values: Vec<Value> = args
                 .iter()
-                .map(|a| eval_in_group(a, group))
+                .map(|a| eval_in_group(a, group, from, types, computed, vault_root))
                 .collect::<Result<Vec<_>, _>>()?;
             functions::call_scalar(name, &values)
         }
         Expr::Literal(v) => Ok(v.clone()),
-        Expr::Column(name) => Ok(first_row_ctx(group)?.resolve(name)),
+        Expr::Column(_) | Expr::QualifiedColumn { .. } => {
+            let first = group
+                .tuples
+                .first()
+                .ok_or_else(|| EvalError::TypeMismatch("empty group".to_string()))?;
+            let ctx = RowCtx::new(from, first, types, computed, vault_root);
+            eval_expr(expr, &ctx)
+        }
         Expr::Unary { op, expr } => {
-            let v = eval_in_group(expr, group)?;
-            match op {
-                UnaryOp::Not => Ok(Value::Bool(!v.is_truthy())),
-                UnaryOp::Neg => match v {
-                    Value::Integer(n) => Ok(Value::Integer(-n)),
-                    Value::Float(f) => Ok(Value::Float(-f)),
-                    Value::Null => Ok(Value::Null),
-                    other => Err(EvalError::TypeMismatch(format!(
-                        "cannot negate {}",
-                        other.type_name()
-                    ))),
-                },
-            }
+            let v = eval_in_group(expr, group, from, types, computed, vault_root)?;
+            apply_unary(*op, &v)
         }
         Expr::Binary { op, left, right } => {
-            let l = eval_in_group(left, group)?;
-            let r = eval_in_group(right, group)?;
+            let l = eval_in_group(left, group, from, types, computed, vault_root)?;
+            let r = eval_in_group(right, group, from, types, computed, vault_root)?;
             eval_binary(*op, &l, &r)
         }
-        Expr::In { expr, list, negated } => {
-            let v = eval_in_group(expr, group)?;
+        Expr::In {
+            expr,
+            list,
+            negated,
+        } => {
+            let v = eval_in_group(expr, group, from, types, computed, vault_root)?;
             let mut any_match = false;
             for item in list {
-                let rhs = eval_in_group(item, group)?;
+                let rhs = eval_in_group(item, group, from, types, computed, vault_root)?;
                 if v.sql_eq(&rhs).unwrap_or(false) {
                     any_match = true;
                     break;
@@ -367,15 +517,15 @@ fn eval_in_group(expr: &Expr, group: &Group<'_>) -> Result<Value, EvalError> {
             high,
             negated,
         } => {
-            let v = eval_in_group(expr, group)?;
-            let lo = eval_in_group(low, group)?;
-            let hi = eval_in_group(high, group)?;
+            let v = eval_in_group(expr, group, from, types, computed, vault_root)?;
+            let lo = eval_in_group(low, group, from, types, computed, vault_root)?;
+            let hi = eval_in_group(high, group, from, types, computed, vault_root)?;
             let in_range = v.cmp_for_order(&lo) != std::cmp::Ordering::Less
                 && v.cmp_for_order(&hi) != std::cmp::Ordering::Greater;
             Ok(Value::Bool(if *negated { !in_range } else { in_range }))
         }
         Expr::IsNull { expr, negated } => {
-            let v = eval_in_group(expr, group)?;
+            let v = eval_in_group(expr, group, from, types, computed, vault_root)?;
             let b = v.is_null();
             Ok(Value::Bool(if *negated { !b } else { b }))
         }
@@ -384,45 +534,16 @@ fn eval_in_group(expr: &Expr, group: &Group<'_>) -> Result<Value, EvalError> {
             pattern,
             negated,
         } => {
-            let v = eval_in_group(expr, group)?;
-            let p = eval_in_group(pattern, group)?;
-            let s = match v {
-                Value::String(s) => s,
-                Value::Null => return Ok(Value::Bool(false)),
-                other => {
-                    return Err(EvalError::TypeMismatch(format!(
-                        "LIKE left operand must be string, got {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            let pat = match p {
-                Value::String(s) => s,
-                other => {
-                    return Err(EvalError::TypeMismatch(format!(
-                        "LIKE pattern must be string, got {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            let matched = like_match(&s, &pat);
-            Ok(Value::Bool(if *negated { !matched } else { matched }))
+            let v = eval_in_group(expr, group, from, types, computed, vault_root)?;
+            let p = eval_in_group(pattern, group, from, types, computed, vault_root)?;
+            apply_like(&v, &p, *negated)
         }
     }
 }
 
-fn first_row_ctx<'a>(group: &'a Group<'a>) -> Result<RowCtx<'a>, EvalError> {
-    let note = group
-        .notes
-        .first()
-        .copied()
-        .ok_or_else(|| EvalError::TypeMismatch("empty group".to_string()))?;
-    Ok(RowCtx::new(note))
-}
-
 fn load_source_rows(
     vault_root: &Path,
-    types: &HashMap<String, crate::mdbase::types::TypeDef>,
+    types: &HashMap<String, TypeDef>,
     config: Option<&crate::mdbase::config::MdbaseConfig>,
     source: &str,
 ) -> Result<Vec<Note>, EvalError> {
@@ -460,6 +581,11 @@ fn list_note_paths(vault_root: &Path) -> Result<Vec<PathBuf>, EvalError> {
     for entry in walkdir::WalkDir::new(vault_root)
         .into_iter()
         .filter_entry(|e| {
+            // Always descend into the root — its name may legitimately start
+            // with `.` (e.g. test tempdirs, vaults tucked under dotdirs).
+            if e.depth() == 0 {
+                return true;
+            }
             let name = e.file_name().to_str().unwrap_or("");
             !name.starts_with('.') && name != "_attachments"
         })
@@ -478,34 +604,115 @@ fn list_note_paths(vault_root: &Path) -> Result<Vec<PathBuf>, EvalError> {
     Ok(paths)
 }
 
-/// Row context passed to expression evaluation: exposes a note's frontmatter,
-/// synthetic columns (`path`, `title`, `tags`), and relative path for output.
+/// Row context passed to expression evaluation. Holds one optional `&Note`
+/// binding per alias in the query's FROM clause; unqualified column
+/// references resolve on the primary (index 0) binding, qualified references
+/// (`alias.column`) look up by alias.
 pub(crate) struct RowCtx<'a> {
-    pub note: &'a Note,
+    pub from: &'a FromClause,
+    pub bindings: &'a [Option<&'a Note>],
+    pub types: &'a HashMap<String, TypeDef>,
+    pub computed: &'a ComputedCache,
+    pub vault_root: &'a Path,
+    pub depth: usize,
 }
 
 impl<'a> RowCtx<'a> {
-    pub fn new(note: &'a Note) -> Self {
-        RowCtx { note }
-    }
-
-    pub fn resolve(&self, name: &str) -> Value {
-        match name {
-            "path" => Value::String(self.note.path.display().to_string()),
-            "title" => Value::String(self.note.title.clone()),
-            "tags" => Value::List(
-                self.note
-                    .tags
-                    .iter()
-                    .map(|t| Value::String(t.clone()))
-                    .collect(),
-            ),
-            other => match self.note.frontmatter.get(other) {
-                Some(v) => Value::from_yaml(v),
-                None => Value::Null,
-            },
+    pub fn new(
+        from: &'a FromClause,
+        bindings: &'a [Option<&'a Note>],
+        types: &'a HashMap<String, TypeDef>,
+        computed: &'a ComputedCache,
+        vault_root: &'a Path,
+    ) -> Self {
+        Self {
+            from,
+            bindings,
+            types,
+            computed,
+            vault_root,
+            depth: 0,
         }
     }
+
+    pub fn primary_note(&self) -> Option<&'a Note> {
+        self.bindings.first().copied().flatten()
+    }
+
+    pub fn resolve(&self, column: &str) -> Result<Value, EvalError> {
+        match self.primary_note() {
+            Some(n) => resolve_on(n, &self.from.primary.type_name, self, column),
+            None => Ok(Value::Null),
+        }
+    }
+
+    fn rel_path(&self, note: &Note) -> String {
+        note.path
+            .strip_prefix(self.vault_root)
+            .unwrap_or(&note.path)
+            .display()
+            .to_string()
+    }
+
+    pub fn resolve_qualified(&self, alias: &str, column: &str) -> Result<Value, EvalError> {
+        let aliases = self.from.aliases();
+        let idx = aliases
+            .iter()
+            .position(|a| *a == alias)
+            .ok_or_else(|| EvalError::UnknownAlias(alias.to_string()))?;
+
+        let type_name = if idx == 0 {
+            &self.from.primary.type_name
+        } else {
+            &self.from.joins[idx - 1].right.type_name
+        };
+
+        match self.bindings.get(idx).and_then(|b| *b) {
+            Some(n) => resolve_on(n, type_name, self, column),
+            None => Ok(Value::Null),
+        }
+    }
+}
+
+fn resolve_on(
+    note: &Note,
+    type_name: &str,
+    ctx: &RowCtx<'_>,
+    column: &str,
+) -> Result<Value, EvalError> {
+    match column {
+        "path" => return Ok(Value::String(ctx.rel_path(note))),
+        "title" => return Ok(Value::String(note.title.clone())),
+        "tags" => {
+            return Ok(Value::List(
+                note.tags.iter().map(|t| Value::String(t.clone())).collect(),
+            ));
+        }
+        _ => {}
+    }
+    if let Some(v) = note.frontmatter.get(column) {
+        return Ok(Value::from_yaml(v));
+    }
+    // Computed fields on this binding's type.
+    if let Some(type_computed) = ctx.computed.get(type_name)
+        && let Some(expr) = type_computed.get(column)
+    {
+        if ctx.depth >= MAX_COMPUTED_DEPTH {
+            return Err(EvalError::ComputedTooDeep(column.to_string()));
+        }
+        let sub_from = FromClause::single(type_name);
+        let sub_bindings: Vec<Option<&Note>> = vec![Some(note)];
+        let sub_ctx = RowCtx {
+            from: &sub_from,
+            bindings: &sub_bindings,
+            types: ctx.types,
+            computed: ctx.computed,
+            vault_root: ctx.vault_root,
+            depth: ctx.depth + 1,
+        };
+        return eval_expr(expr, &sub_ctx);
+    }
+    Ok(Value::Null)
 }
 
 fn resolve_columns(projs: &[Projection]) -> Vec<String> {
@@ -524,60 +731,65 @@ fn resolve_columns(projs: &[Projection]) -> Vec<String> {
 fn expr_label(e: &Expr) -> String {
     match e {
         Expr::Column(name) => name.clone(),
+        Expr::QualifiedColumn { table, column } => format!("{table}.{column}"),
         Expr::Function { name, .. } => name.to_uppercase(),
         _ => "_expr".to_string(),
     }
 }
 
 fn project_row(
-    note: &Note,
+    ctx: &RowCtx<'_>,
     projs: &[Projection],
     vault_root: &Path,
 ) -> Result<QueryResultRow, EvalError> {
-    let ctx = RowCtx::new(note);
     let mut cells = Vec::new();
     for p in projs {
         match p {
             Projection::Wildcard => {
-                // For `SELECT *`, emit a single aggregated cell holding the
-                // frontmatter. CLI/API callers can flatten as they see fit.
-                // For Phase 3 we render it as a compact string.
-                let pairs: Vec<String> = note
-                    .frontmatter
-                    .iter()
-                    .map(|(k, v)| format!("{k}={}", Value::from_yaml(v)))
-                    .collect();
+                let pairs: Vec<String> = match ctx.primary_note() {
+                    Some(n) => n
+                        .frontmatter
+                        .iter()
+                        .map(|(k, v)| format!("{k}={}", Value::from_yaml(v)))
+                        .collect(),
+                    None => Vec::new(),
+                };
                 cells.push(Value::String(pairs.join(", ")));
             }
             Projection::Expr { expr, .. } => {
-                cells.push(eval_expr(expr, &ctx)?);
+                cells.push(eval_expr(expr, ctx)?);
             }
         }
     }
-    let rel = note.path.strip_prefix(vault_root).unwrap_or(&note.path);
-    Ok(QueryResultRow {
-        path: rel.to_path_buf(),
-        cells,
-    })
+    let rel = match ctx.primary_note() {
+        Some(n) => n
+            .path
+            .strip_prefix(vault_root)
+            .unwrap_or(&n.path)
+            .to_path_buf(),
+        None => PathBuf::new(),
+    };
+    Ok(QueryResultRow { path: rel, cells })
 }
 
 fn apply_order_by(
     rows: &mut [QueryResultRow],
+    tuples: &[Vec<Option<&Note>>],
     order_by: &[OrderBy],
-    notes: &[Note],
-    _vault_root: &Path,
+    from: &FromClause,
+    types: &HashMap<String, TypeDef>,
+    computed: &ComputedCache,
+    vault_root: &Path,
 ) -> Result<(), EvalError> {
     if order_by.is_empty() {
         return Ok(());
     }
 
-    // Precompute sort keys for each note so ordering doesn't re-evaluate
-    // expressions per comparison.
     let mut keyed: Vec<(Vec<Value>, &QueryResultRow)> = rows
         .iter()
-        .zip(notes.iter())
-        .map(|(row, note)| {
-            let ctx = RowCtx::new(note);
+        .zip(tuples.iter())
+        .map(|(row, tuple)| {
+            let ctx = RowCtx::new(from, tuple, types, computed, vault_root);
             let keys = order_by
                 .iter()
                 .map(|o| eval_expr(&o.expr, &ctx))
@@ -622,8 +834,6 @@ fn apply_pagination(rows: &mut Vec<QueryResultRow>, offset: usize, limit: Option
     }
 }
 
-/// Evaluate a predicate expression. NULL → false for filtering (standard SQL:
-/// `WHERE x` filters out NULL rows).
 fn eval_predicate(expr: &Expr, ctx: &RowCtx<'_>) -> Result<bool, EvalError> {
     let v = eval_expr(expr, ctx)?;
     Ok(v.is_truthy())
@@ -632,28 +842,22 @@ fn eval_predicate(expr: &Expr, ctx: &RowCtx<'_>) -> Result<bool, EvalError> {
 pub(crate) fn eval_expr(expr: &Expr, ctx: &RowCtx<'_>) -> Result<Value, EvalError> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
-        Expr::Column(name) => Ok(ctx.resolve(name)),
+        Expr::Column(name) => ctx.resolve(name),
+        Expr::QualifiedColumn { table, column } => ctx.resolve_qualified(table, column),
         Expr::Unary { op, expr } => {
             let v = eval_expr(expr, ctx)?;
-            match op {
-                UnaryOp::Not => Ok(Value::Bool(!v.is_truthy())),
-                UnaryOp::Neg => match v {
-                    Value::Integer(n) => Ok(Value::Integer(-n)),
-                    Value::Float(f) => Ok(Value::Float(-f)),
-                    Value::Null => Ok(Value::Null),
-                    other => Err(EvalError::TypeMismatch(format!(
-                        "cannot negate {}",
-                        other.type_name()
-                    ))),
-                },
-            }
+            apply_unary(*op, &v)
         }
         Expr::Binary { op, left, right } => {
             let l = eval_expr(left, ctx)?;
             let r = eval_expr(right, ctx)?;
             eval_binary(*op, &l, &r)
         }
-        Expr::In { expr, list, negated } => {
+        Expr::In {
+            expr,
+            list,
+            negated,
+        } => {
             let v = eval_expr(expr, ctx)?;
             let mut any_match = false;
             for item in list {
@@ -690,23 +894,7 @@ pub(crate) fn eval_expr(expr: &Expr, ctx: &RowCtx<'_>) -> Result<Value, EvalErro
         } => {
             let v = eval_expr(expr, ctx)?;
             let p = eval_expr(pattern, ctx)?;
-            let s = match v {
-                Value::String(s) => s,
-                Value::Null => return Ok(Value::Bool(false)),
-                other => return Err(EvalError::TypeMismatch(format!(
-                    "LIKE left operand must be string, got {}",
-                    other.type_name()
-                ))),
-            };
-            let pat = match p {
-                Value::String(s) => s,
-                other => return Err(EvalError::TypeMismatch(format!(
-                    "LIKE pattern must be string, got {}",
-                    other.type_name()
-                ))),
-            };
-            let matched = like_match(&s, &pat);
-            Ok(Value::Bool(if *negated { !matched } else { matched }))
+            apply_like(&v, &p, *negated)
         }
         Expr::Function { name, args } => {
             if functions::is_aggregate(name) {
@@ -724,6 +912,45 @@ pub(crate) fn eval_expr(expr: &Expr, ctx: &RowCtx<'_>) -> Result<Value, EvalErro
     }
 }
 
+fn apply_unary(op: UnaryOp, v: &Value) -> Result<Value, EvalError> {
+    match op {
+        UnaryOp::Not => Ok(Value::Bool(!v.is_truthy())),
+        UnaryOp::Neg => match v {
+            Value::Integer(n) => Ok(Value::Integer(-n)),
+            Value::Float(f) => Ok(Value::Float(-f)),
+            Value::Null => Ok(Value::Null),
+            other => Err(EvalError::TypeMismatch(format!(
+                "cannot negate {}",
+                other.type_name()
+            ))),
+        },
+    }
+}
+
+fn apply_like(v: &Value, p: &Value, negated: bool) -> Result<Value, EvalError> {
+    let s = match v {
+        Value::String(s) => s.clone(),
+        Value::Null => return Ok(Value::Bool(false)),
+        other => {
+            return Err(EvalError::TypeMismatch(format!(
+                "LIKE left operand must be string, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    let pat = match p {
+        Value::String(s) => s.clone(),
+        other => {
+            return Err(EvalError::TypeMismatch(format!(
+                "LIKE pattern must be string, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    let matched = like_match(&s, &pat);
+    Ok(Value::Bool(if negated { !matched } else { matched }))
+}
+
 fn eval_binary(op: BinaryOp, l: &Value, r: &Value) -> Result<Value, EvalError> {
     match op {
         BinaryOp::And => Ok(Value::Bool(l.is_truthy() && r.is_truthy())),
@@ -731,19 +958,22 @@ fn eval_binary(op: BinaryOp, l: &Value, r: &Value) -> Result<Value, EvalError> {
         BinaryOp::Eq => Ok(Value::Bool(l.sql_eq(r).unwrap_or(false))),
         BinaryOp::NotEq => Ok(Value::Bool(!l.sql_eq(r).unwrap_or(true))),
         BinaryOp::Lt => Ok(Value::Bool(l.cmp_for_order(r) == std::cmp::Ordering::Less)),
-        BinaryOp::LtEq => Ok(Value::Bool(l.cmp_for_order(r) != std::cmp::Ordering::Greater)),
-        BinaryOp::Gt => Ok(Value::Bool(l.cmp_for_order(r) == std::cmp::Ordering::Greater)),
+        BinaryOp::LtEq => Ok(Value::Bool(
+            l.cmp_for_order(r) != std::cmp::Ordering::Greater,
+        )),
+        BinaryOp::Gt => Ok(Value::Bool(
+            l.cmp_for_order(r) == std::cmp::Ordering::Greater,
+        )),
         BinaryOp::GtEq => Ok(Value::Bool(l.cmp_for_order(r) != std::cmp::Ordering::Less)),
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
-            arith(op, l, r).ok_or_else(|| {
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => arith(op, l, r)
+            .ok_or_else(|| {
                 EvalError::TypeMismatch(format!(
                     "cannot apply {:?} to {}, {}",
                     op,
                     l.type_name(),
                     r.type_name()
                 ))
-            })
-        }
+            }),
     }
 }
 

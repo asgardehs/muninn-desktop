@@ -16,10 +16,13 @@ pub mod eval;
 pub mod functions;
 pub mod parser;
 pub mod value;
+pub mod writeback;
 
-pub use ast::{Expr, MuninnQuery, OrderBy, Projection, SortOrder};
-pub use eval::{EvalError, QueryResultSet, execute};
-pub use parser::{ParseError, parse_query};
+pub use ast::{
+    Expr, FromClause, Join, JoinKind, MuninnQuery, OrderBy, Projection, SortOrder, TableRef,
+};
+pub use eval::{EvalError, QueryResultRow, QueryResultSet, execute};
+pub use parser::{ParseError, parse_expr, parse_query};
 pub use value::Value;
 
 /// Synthetic "any type" source: `FROM note` selects from all notes in the vault,

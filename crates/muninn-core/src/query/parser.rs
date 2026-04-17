@@ -2,21 +2,24 @@
 //!
 //! Wraps `sqlparser-rs` and accepts only the narrow subset the evaluator
 //! supports. Anything outside that subset — DDL, DML, CTEs, UNION, subqueries,
-//! JOINs (deferred to Phase 5), window functions — returns a `ParseError`
-//! with a clear message.
+//! window functions — returns a `ParseError` with a clear message. JOINs are
+//! supported as of Phase 5 (INNER and LEFT only, `ON` predicate required).
 
 use sqlparser::ast::{
-    BinaryOperator as SqlBinOp, Expr as SqlExpr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, OrderByExpr, Query as SqlQuery, Select, SelectItem,
+    BinaryOperator as SqlBinOp, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, JoinConstraint, JoinOperator, OrderByExpr, Query as SqlQuery, Select, SelectItem,
     SetExpr, Statement, TableFactor, UnaryOperator as SqlUnOp, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
 
-use super::ast::{BinaryOp, Expr, MuninnQuery, OrderBy, Projection, SortOrder, UnaryOp};
+use super::MAX_EXPR_DEPTH;
+use super::ast::{
+    BinaryOp, Expr, FromClause, Join, JoinKind, MuninnQuery, OrderBy, Projection, SortOrder,
+    TableRef, UnaryOp,
+};
 use super::value::Value;
-use super::{MAX_EXPR_DEPTH};
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -30,11 +33,29 @@ pub enum ParseError {
     InvalidLiteral(String),
     #[error("FROM clause must name a single type")]
     BadFrom,
+    #[error("duplicate FROM alias: {0}")]
+    DuplicateAlias(String),
+}
+
+/// Parse a bare SQL expression (no surrounding SELECT). Used for computed
+/// field definitions on types and Runestone virtual columns, where users
+/// write an expression string and we want the same operators, functions, and
+/// semantics as `WHERE` clauses.
+pub fn parse_expr(raw: &str) -> Result<Expr, ParseError> {
+    let dialect = GenericDialect {};
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql(raw)
+        .map_err(|e| ParseError::Sql(e.to_string()))?;
+    let sql_expr = parser
+        .parse_expr()
+        .map_err(|e| ParseError::Sql(e.to_string()))?;
+    lower_expr(&sql_expr, 0)
 }
 
 pub fn parse_query(sql: &str) -> Result<MuninnQuery, ParseError> {
     let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).map_err(|e| ParseError::Sql(e.to_string()))?;
+    let statements =
+        Parser::parse_sql(&dialect, sql).map_err(|e| ParseError::Sql(e.to_string()))?;
 
     if statements.len() != 1 {
         return Err(ParseError::Unsupported(
@@ -44,7 +65,11 @@ pub fn parse_query(sql: &str) -> Result<MuninnQuery, ParseError> {
 
     let query = match statements.into_iter().next().unwrap() {
         Statement::Query(q) => q,
-        _ => return Err(ParseError::Unsupported("only SELECT statements are allowed")),
+        _ => {
+            return Err(ParseError::Unsupported(
+                "only SELECT statements are allowed",
+            ));
+        }
     };
 
     lower_query(*query)
@@ -65,7 +90,9 @@ fn lower_query(q: SqlQuery) -> Result<MuninnQuery, ParseError> {
         SetExpr::Select(s) => *s,
         SetExpr::Query(_) => return Err(ParseError::Unsupported("nested queries not supported")),
         SetExpr::SetOperation { .. } => {
-            return Err(ParseError::Unsupported("UNION/INTERSECT/EXCEPT not supported"));
+            return Err(ParseError::Unsupported(
+                "UNION/INTERSECT/EXCEPT not supported",
+            ));
         }
         SetExpr::Values(_) => return Err(ParseError::Unsupported("VALUES not supported")),
         SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {
@@ -129,24 +156,66 @@ fn lower_query(q: SqlQuery) -> Result<MuninnQuery, ParseError> {
     })
 }
 
-fn lower_from(select: &Select) -> Result<String, ParseError> {
+fn lower_from(select: &Select) -> Result<FromClause, ParseError> {
     if select.from.len() != 1 {
         return Err(ParseError::Unsupported(
-            "multi-table FROM and JOINs arrive in Phase 5",
+            "comma-separated FROM not supported — use JOIN ... ON",
         ));
     }
     let twj = &select.from[0];
-    if !twj.joins.is_empty() {
-        return Err(ParseError::Unsupported(
-            "JOINs are not yet supported (Phase 5)",
-        ));
+    let primary = lower_table_factor(&twj.relation)?;
+
+    let mut seen_aliases: Vec<String> = vec![primary.alias.clone()];
+    let mut joins = Vec::with_capacity(twj.joins.len());
+    for j in &twj.joins {
+        let right = lower_table_factor(&j.relation)?;
+        if seen_aliases.iter().any(|a| a == &right.alias) {
+            return Err(ParseError::DuplicateAlias(right.alias.clone()));
+        }
+        seen_aliases.push(right.alias.clone());
+
+        let (kind, constraint) = match &j.join_operator {
+            JoinOperator::Inner(c) => (JoinKind::Inner, c),
+            JoinOperator::LeftOuter(c) => (JoinKind::Left, c),
+            _ => {
+                return Err(ParseError::Unsupported(
+                    "only INNER and LEFT JOIN are supported",
+                ));
+            }
+        };
+        let on = match constraint {
+            JoinConstraint::On(e) => lower_expr(e, 0)?,
+            JoinConstraint::Using(_) => {
+                return Err(ParseError::Unsupported("JOIN USING not supported — use ON"));
+            }
+            JoinConstraint::Natural => {
+                return Err(ParseError::Unsupported("NATURAL JOIN not supported"));
+            }
+            JoinConstraint::None => {
+                return Err(ParseError::Unsupported("JOIN requires an ON clause"));
+            }
+        };
+        joins.push(Join { kind, right, on });
     }
-    match &twj.relation {
-        TableFactor::Table { name, .. } => {
+
+    Ok(FromClause { primary, joins })
+}
+
+fn lower_table_factor(tf: &TableFactor) -> Result<TableRef, ParseError> {
+    match tf {
+        TableFactor::Table { name, alias, .. } => {
             if name.0.len() != 1 {
                 return Err(ParseError::BadFrom);
             }
-            Ok(name.0[0].value.clone())
+            let type_name = name.0[0].value.clone();
+            let alias_name = alias
+                .as_ref()
+                .map(|a| a.name.value.clone())
+                .unwrap_or_else(|| type_name.clone());
+            Ok(TableRef {
+                type_name,
+                alias: alias_name,
+            })
         }
         _ => Err(ParseError::BadFrom),
     }
@@ -204,17 +273,26 @@ fn lower_expr(e: &SqlExpr, depth: usize) -> Result<Expr, ParseError> {
     match e {
         SqlExpr::Identifier(id) => Ok(Expr::Column(id.value.clone())),
         SqlExpr::CompoundIdentifier(parts) => {
-            // Phase 3: `table.column` collapses to just `column`. Runestone
-            // dotted relation access (Phase 5) will route through here.
-            let last = parts
-                .last()
-                .ok_or(ParseError::Unsupported("empty compound identifier"))?;
-            Ok(Expr::Column(last.value.clone()))
+            if parts.len() == 2 {
+                Ok(Expr::QualifiedColumn {
+                    table: parts[0].value.clone(),
+                    column: parts[1].value.clone(),
+                })
+            } else if parts.len() == 1 {
+                Ok(Expr::Column(parts[0].value.clone()))
+            } else {
+                Err(ParseError::Unsupported(
+                    "multi-level compound identifiers not supported",
+                ))
+            }
         }
         SqlExpr::Value(v) => Ok(Expr::Literal(lower_literal(v)?)),
-        SqlExpr::TypedString { data_type: _, value } => Ok(Expr::Literal(
-            super::value::Value::from_yaml(&serde_yaml::Value::String(value.clone())),
-        )),
+        SqlExpr::TypedString {
+            data_type: _,
+            value,
+        } => Ok(Expr::Literal(super::value::Value::from_yaml(
+            &serde_yaml::Value::String(value.clone()),
+        ))),
         SqlExpr::Nested(inner) => lower_expr(inner, d),
         SqlExpr::UnaryOp { op, expr } => {
             let op = match op {
@@ -244,7 +322,11 @@ fn lower_expr(e: &SqlExpr, depth: usize) -> Result<Expr, ParseError> {
             expr: Box::new(lower_expr(inner, d)?),
             negated: true,
         }),
-        SqlExpr::InList { expr, list, negated } => {
+        SqlExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
             let list = list
                 .iter()
                 .map(|x| lower_expr(x, d))
@@ -374,7 +456,9 @@ fn lower_literal(v: &SqlValue) -> Result<Value, ParseError> {
         | SqlValue::DoubleQuotedString(s)
         | SqlValue::TripleSingleQuotedString(s)
         | SqlValue::TripleDoubleQuotedString(s)
-        | SqlValue::NationalStringLiteral(s) => Ok(Value::from_yaml(&serde_yaml::Value::String(s.clone()))),
+        | SqlValue::NationalStringLiteral(s) => {
+            Ok(Value::from_yaml(&serde_yaml::Value::String(s.clone())))
+        }
         SqlValue::Boolean(b) => Ok(Value::Bool(*b)),
         SqlValue::Null => Ok(Value::Null),
         _ => Err(ParseError::Unsupported("unsupported literal form")),
@@ -399,12 +483,42 @@ mod tests {
     #[test]
     fn rejects_insert() {
         let err = parse_query("INSERT INTO note VALUES (1)").unwrap_err();
-        assert!(matches!(err, ParseError::Unsupported(_) | ParseError::Sql(_)));
+        assert!(matches!(
+            err,
+            ParseError::Unsupported(_) | ParseError::Sql(_)
+        ));
     }
 
     #[test]
-    fn rejects_join() {
-        let err = parse_query("SELECT * FROM note JOIN ref ON note.id = ref.id").unwrap_err();
+    fn parses_inner_join() {
+        let q = parse_query("SELECT a.title, b.title FROM task a JOIN task b ON a.parent = b.path")
+            .unwrap();
+        assert_eq!(q.from.primary.type_name, "task");
+        assert_eq!(q.from.primary.alias, "a");
+        assert_eq!(q.from.joins.len(), 1);
+        assert_eq!(q.from.joins[0].kind, JoinKind::Inner);
+        assert_eq!(q.from.joins[0].right.alias, "b");
+        assert_eq!(q.from.joins[0].right.type_name, "task");
+    }
+
+    #[test]
+    fn parses_left_join() {
+        let q = parse_query("SELECT a.title FROM task a LEFT JOIN project p ON a.project = p.path")
+            .unwrap();
+        assert_eq!(q.from.joins[0].kind, JoinKind::Left);
+    }
+
+    #[test]
+    fn rejects_duplicate_alias() {
+        let err = parse_query("SELECT * FROM task a JOIN task a ON a.parent = a.path").unwrap_err();
+        assert!(matches!(err, ParseError::DuplicateAlias(_)));
+    }
+
+    #[test]
+    fn rejects_using_and_natural() {
+        let err = parse_query("SELECT * FROM task a JOIN project p USING (path)").unwrap_err();
+        assert!(matches!(err, ParseError::Unsupported(_)));
+        let err = parse_query("SELECT * FROM task NATURAL JOIN project").unwrap_err();
         assert!(matches!(err, ParseError::Unsupported(_)));
     }
 
@@ -417,7 +531,9 @@ mod tests {
     #[test]
     fn parses_simple_select() {
         let q = parse_query("SELECT title, status FROM note WHERE status = 'active'").unwrap();
-        assert_eq!(q.from, "note");
+        assert_eq!(q.from.primary.type_name, "note");
+        assert_eq!(q.from.primary.alias, "note");
+        assert!(q.from.joins.is_empty());
         assert_eq!(q.projections.len(), 2);
         assert!(q.filter.is_some());
     }
@@ -430,7 +546,8 @@ mod tests {
 
     #[test]
     fn parses_order_limit_offset() {
-        let q = parse_query("SELECT title FROM note ORDER BY created DESC LIMIT 10 OFFSET 5").unwrap();
+        let q =
+            parse_query("SELECT title FROM note ORDER BY created DESC LIMIT 10 OFFSET 5").unwrap();
         assert_eq!(q.order_by.len(), 1);
         assert_eq!(q.order_by[0].order, SortOrder::Desc);
         assert_eq!(q.limit, Some(10));
@@ -444,5 +561,20 @@ mod tests {
         )
         .unwrap();
         assert!(q.filter.is_some());
+    }
+
+    #[test]
+    fn parses_qualified_column() {
+        let q = parse_query("SELECT a.title FROM task a").unwrap();
+        match &q.projections[0] {
+            Projection::Expr {
+                expr: Expr::QualifiedColumn { table, column },
+                ..
+            } => {
+                assert_eq!(table, "a");
+                assert_eq!(column, "title");
+            }
+            other => panic!("unexpected projection: {:?}", other),
+        }
     }
 }

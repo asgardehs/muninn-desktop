@@ -130,7 +130,11 @@ pub fn validate_field(
     }
 }
 
-fn validate_string(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec<ValidationError> {
+fn validate_string(
+    name: &str,
+    value: &serde_yaml::Value,
+    field: &FieldDef,
+) -> Vec<ValidationError> {
     let s = match value.as_str() {
         Some(s) => s,
         None => {
@@ -146,40 +150,47 @@ fn validate_string(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> V
     let mut errors = Vec::new();
 
     if let Some(min) = field.min_length
-        && s.len() < min {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("string length {} below minimum {}", s.len(), min),
-                severity: Severity::Error,
-            });
-        }
+        && s.len() < min
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("string length {} below minimum {}", s.len(), min),
+            severity: Severity::Error,
+        });
+    }
 
     if let Some(max) = field.max_length
-        && s.len() > max {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("string length {} above maximum {}", s.len(), max),
-                severity: Severity::Error,
-            });
-        }
+        && s.len() > max
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("string length {} above maximum {}", s.len(), max),
+            severity: Severity::Error,
+        });
+    }
 
     if let Some(ref pattern) = field.pattern
         && let Ok(re) = Regex::new(pattern)
-            && !re.is_match(s) {
-                errors.push(ValidationError {
-                    field: name.to_string(),
-                    code: "constraint_violation".to_string(),
-                    message: format!("value {:?} does not match pattern {:?}", s, pattern),
-                    severity: Severity::Error,
-                });
-            }
+        && !re.is_match(s)
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("value {:?} does not match pattern {:?}", s, pattern),
+            severity: Severity::Error,
+        });
+    }
 
     errors
 }
 
-fn validate_integer(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec<ValidationError> {
+fn validate_integer(
+    name: &str,
+    value: &serde_yaml::Value,
+    field: &FieldDef,
+) -> Vec<ValidationError> {
     let n = match value {
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -204,11 +215,13 @@ fn validate_integer(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> 
     validate_numeric_constraints(name, n, field)
 }
 
-fn validate_number(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec<ValidationError> {
+fn validate_number(
+    name: &str,
+    value: &serde_yaml::Value,
+    field: &FieldDef,
+) -> Vec<ValidationError> {
     let n = match value {
-        serde_yaml::Value::Number(n) => {
-            n.as_f64().unwrap_or(0.0)
-        }
+        serde_yaml::Value::Number(n) => n.as_f64().unwrap_or(0.0),
         _ => return vec![type_mismatch(name, "number", value)],
     };
 
@@ -219,24 +232,26 @@ fn validate_numeric_constraints(name: &str, n: f64, field: &FieldDef) -> Vec<Val
     let mut errors = Vec::new();
 
     if let Some(min) = field.min
-        && n < min {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("value {} below minimum {}", n, min),
-                severity: Severity::Error,
-            });
-        }
+        && n < min
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("value {} below minimum {}", n, min),
+            severity: Severity::Error,
+        });
+    }
 
     if let Some(max) = field.max
-        && n > max {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("value {} above maximum {}", n, max),
-                severity: Severity::Error,
-            });
-        }
+        && n > max
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("value {} above maximum {}", n, max),
+            severity: Severity::Error,
+        });
+    }
 
     errors
 }
@@ -346,24 +361,26 @@ fn validate_list(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec
     let mut errors = Vec::new();
 
     if let Some(min) = field.min_items
-        && list.len() < min {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("list length {} below minimum {}", list.len(), min),
-                severity: Severity::Error,
-            });
-        }
+        && list.len() < min
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("list length {} below minimum {}", list.len(), min),
+            severity: Severity::Error,
+        });
+    }
 
     if let Some(max) = field.max_items
-        && list.len() > max {
-            errors.push(ValidationError {
-                field: name.to_string(),
-                code: "constraint_violation".to_string(),
-                message: format!("list length {} above maximum {}", list.len(), max),
-                severity: Severity::Error,
-            });
-        }
+        && list.len() > max
+    {
+        errors.push(ValidationError {
+            field: name.to_string(),
+            code: "constraint_violation".to_string(),
+            message: format!("list length {} above maximum {}", list.len(), max),
+            severity: Severity::Error,
+        });
+    }
 
     if let Some(ref items_def) = field.items {
         for (i, item) in list.iter().enumerate() {
@@ -376,7 +393,11 @@ fn validate_list(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec
     errors
 }
 
-fn validate_object(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> Vec<ValidationError> {
+fn validate_object(
+    name: &str,
+    value: &serde_yaml::Value,
+    field: &FieldDef,
+) -> Vec<ValidationError> {
     let map = match value.as_mapping() {
         Some(map) => map,
         None => return vec![type_mismatch(name, "object", value)],
@@ -406,11 +427,12 @@ fn validate_object(name: &str, value: &serde_yaml::Value, field: &FieldDef) -> V
         // Validate each sub-field value.
         for (key, val) in map {
             if let Some(key_str) = key.as_str()
-                && let Some(sub_field) = sub_fields.get(key_str) {
-                    let sub_name = format!("{}.{}", name, key_str);
-                    let sub_errors = validate_field(&sub_name, val, sub_field);
-                    errors.extend(sub_errors);
-                }
+                && let Some(sub_field) = sub_fields.get(key_str)
+            {
+                let sub_name = format!("{}.{}", name, key_str);
+                let sub_errors = validate_field(&sub_name, val, sub_field);
+                errors.extend(sub_errors);
+            }
         }
     }
 
@@ -457,18 +479,7 @@ mod tests {
     }
 
     fn default_typedef() -> TypeDef {
-        TypeDef {
-            name: String::new(),
-            description: None,
-            extends: None,
-            fields: IndexMap::new(),
-            strict: None,
-            r#match: None,
-            path_pattern: None,
-            display_name_key: None,
-            resolved_fields: None,
-            body: String::new(),
-        }
+        TypeDef::default()
     }
 
     fn fm(pairs: Vec<(&str, serde_yaml::Value)>) -> HashMap<String, serde_yaml::Value> {
@@ -477,10 +488,16 @@ mod tests {
 
     #[test]
     fn required_field_missing() {
-        let td = make_type("note", vec![("title", FieldDef {
-            required: true,
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "title",
+                FieldDef {
+                    required: true,
+                    ..Default::default()
+                },
+            )],
+        );
 
         let errors = validate_record(&HashMap::new(), &td, None);
         assert_eq!(errors.len(), 1);
@@ -489,22 +506,37 @@ mod tests {
 
     #[test]
     fn required_field_present() {
-        let td = make_type("note", vec![("title", FieldDef {
-            required: true,
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "title",
+                FieldDef {
+                    required: true,
+                    ..Default::default()
+                },
+            )],
+        );
 
-        let frontmatter = fm(vec![("title", serde_yaml::Value::String("Hello".to_string()))]);
+        let frontmatter = fm(vec![(
+            "title",
+            serde_yaml::Value::String("Hello".to_string()),
+        )]);
         let errors = validate_record(&frontmatter, &td, None);
         assert!(errors.is_empty());
     }
 
     #[test]
     fn string_min_length() {
-        let td = make_type("note", vec![("title", FieldDef {
-            min_length: Some(5),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "title",
+                FieldDef {
+                    min_length: Some(5),
+                    ..Default::default()
+                },
+            )],
+        );
 
         let frontmatter = fm(vec![("title", serde_yaml::Value::String("Hi".to_string()))]);
         let errors = validate_record(&frontmatter, &td, None);
@@ -514,26 +546,44 @@ mod tests {
 
     #[test]
     fn enum_valid_value() {
-        let td = make_type("note", vec![("status", FieldDef {
-            field_type: "enum".to_string(),
-            values: Some(vec!["active".to_string(), "done".to_string()]),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "status",
+                FieldDef {
+                    field_type: "enum".to_string(),
+                    values: Some(vec!["active".to_string(), "done".to_string()]),
+                    ..Default::default()
+                },
+            )],
+        );
 
-        let frontmatter = fm(vec![("status", serde_yaml::Value::String("active".to_string()))]);
+        let frontmatter = fm(vec![(
+            "status",
+            serde_yaml::Value::String("active".to_string()),
+        )]);
         let errors = validate_record(&frontmatter, &td, None);
         assert!(errors.is_empty());
     }
 
     #[test]
     fn enum_invalid_value() {
-        let td = make_type("note", vec![("status", FieldDef {
-            field_type: "enum".to_string(),
-            values: Some(vec!["active".to_string(), "done".to_string()]),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "status",
+                FieldDef {
+                    field_type: "enum".to_string(),
+                    values: Some(vec!["active".to_string(), "done".to_string()]),
+                    ..Default::default()
+                },
+            )],
+        );
 
-        let frontmatter = fm(vec![("status", serde_yaml::Value::String("unknown".to_string()))]);
+        let frontmatter = fm(vec![(
+            "status",
+            serde_yaml::Value::String("unknown".to_string()),
+        )]);
         let errors = validate_record(&frontmatter, &td, None);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "constraint_violation");
@@ -570,12 +620,18 @@ mod tests {
 
     #[test]
     fn list_validation() {
-        let td = make_type("note", vec![("tags", FieldDef {
-            field_type: "list".to_string(),
-            items: Some(Box::new(FieldDef::default())), // string items
-            min_items: Some(1),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "tags",
+                FieldDef {
+                    field_type: "list".to_string(),
+                    items: Some(Box::new(FieldDef::default())), // string items
+                    min_items: Some(1),
+                    ..Default::default()
+                },
+            )],
+        );
 
         let frontmatter = fm(vec![("tags", serde_yaml::Value::Sequence(vec![]))]);
         let errors = validate_record(&frontmatter, &td, None);
@@ -585,12 +641,21 @@ mod tests {
 
     #[test]
     fn integer_type_mismatch() {
-        let td = make_type("note", vec![("count", FieldDef {
-            field_type: "integer".to_string(),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "count",
+                FieldDef {
+                    field_type: "integer".to_string(),
+                    ..Default::default()
+                },
+            )],
+        );
 
-        let frontmatter = fm(vec![("count", serde_yaml::Value::String("not a number".to_string()))]);
+        let frontmatter = fm(vec![(
+            "count",
+            serde_yaml::Value::String("not a number".to_string()),
+        )]);
         let errors = validate_record(&frontmatter, &td, None);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "type_mismatch");
@@ -598,17 +663,29 @@ mod tests {
 
     #[test]
     fn date_validation() {
-        let td = make_type("note", vec![("due", FieldDef {
-            field_type: "date".to_string(),
-            ..Default::default()
-        })]);
+        let td = make_type(
+            "note",
+            vec![(
+                "due",
+                FieldDef {
+                    field_type: "date".to_string(),
+                    ..Default::default()
+                },
+            )],
+        );
 
         // Valid date.
-        let frontmatter = fm(vec![("due", serde_yaml::Value::String("2026-04-15".to_string()))]);
+        let frontmatter = fm(vec![(
+            "due",
+            serde_yaml::Value::String("2026-04-15".to_string()),
+        )]);
         assert!(validate_record(&frontmatter, &td, None).is_empty());
 
         // Invalid date.
-        let frontmatter = fm(vec![("due", serde_yaml::Value::String("not-a-date".to_string()))]);
+        let frontmatter = fm(vec![(
+            "due",
+            serde_yaml::Value::String("not-a-date".to_string()),
+        )]);
         assert_eq!(validate_record(&frontmatter, &td, None).len(), 1);
     }
 }

@@ -44,10 +44,16 @@ impl NoteFilter {
     }
 
     /// Check if a note passes this filter.
-    pub fn matches(&self, frontmatter: &HashMap<String, serde_yaml::Value>, title: &str, tags: &[String]) -> bool {
+    pub fn matches(
+        &self,
+        frontmatter: &HashMap<String, serde_yaml::Value>,
+        title: &str,
+        tags: &[String],
+    ) -> bool {
         // Type filter.
         if let Some(ref ft) = self.note_type {
-            let note_type = frontmatter.get("type")
+            let note_type = frontmatter
+                .get("type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !note_type.eq_ignore_ascii_case(ft) {
@@ -65,9 +71,10 @@ impl NoteFilter {
 
         // Title filter.
         if let Some(ref ft) = self.title_contains
-            && !title.to_lowercase().contains(&ft.to_lowercase()) {
-                return false;
-            }
+            && !title.to_lowercase().contains(&ft.to_lowercase())
+        {
+            return false;
+        }
 
         // Field filters.
         for (key, expected) in &self.field_filters {
@@ -94,7 +101,8 @@ mod tests {
     use super::*;
 
     fn fm(pairs: Vec<(&str, &str)>) -> HashMap<String, serde_yaml::Value> {
-        pairs.into_iter()
+        pairs
+            .into_iter()
             .map(|(k, v)| (k.to_string(), serde_yaml::Value::String(v.to_string())))
             .collect()
     }

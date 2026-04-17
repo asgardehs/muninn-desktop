@@ -203,8 +203,14 @@ mod tests {
 
     #[test]
     fn null_compares_as_less() {
-        assert_eq!(Value::Null.cmp_for_order(&Value::Integer(1)), Ordering::Less);
-        assert_eq!(Value::Integer(1).cmp_for_order(&Value::Null), Ordering::Greater);
+        assert_eq!(
+            Value::Null.cmp_for_order(&Value::Integer(1)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::Integer(1).cmp_for_order(&Value::Null),
+            Ordering::Greater
+        );
     }
 
     #[test]

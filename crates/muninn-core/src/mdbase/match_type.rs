@@ -45,11 +45,10 @@ fn resolve_explicit_types<'a>(
 
         let names: Vec<String> = match val {
             serde_yaml::Value::String(s) => vec![s.clone()],
-            serde_yaml::Value::Sequence(seq) => {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            }
+            serde_yaml::Value::Sequence(seq) => seq
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
             _ => continue,
         };
 
@@ -135,14 +134,16 @@ fn matches_rule(
 
 fn matches_condition(val: &serde_yaml::Value, cond: &super::types::WhereCond) -> bool {
     if let Some(ref eq) = cond.eq
-        && val != eq {
-            return false;
-        }
+        && val != eq
+    {
+        return false;
+    }
 
     if let Some(ref ne) = cond.ne
-        && val == ne {
-            return false;
-        }
+        && val == ne
+    {
+        return false;
+    }
 
     if let Some(ref contains) = cond.contains {
         match val.as_str() {
@@ -167,31 +168,24 @@ fn matches_condition(val: &serde_yaml::Value, cond: &super::types::WhereCond) ->
     }
 
     if let Some(ref in_values) = cond.r#in
-        && !in_values.contains(val) {
-            return false;
-        }
+        && !in_values.contains(val)
+    {
+        return false;
+    }
 
     true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::MatchRule;
-    use indexmap::IndexMap;
+    use super::*;
 
     fn make_type_with_match(name: &str, rule: MatchRule) -> TypeDef {
         TypeDef {
             name: name.to_string(),
             r#match: Some(rule),
-            fields: IndexMap::new(),
-            description: None,
-            extends: None,
-            strict: None,
-            path_pattern: None,
-            display_name_key: None,
-            resolved_fields: None,
-            body: String::new(),
+            ..Default::default()
         }
     }
 
@@ -202,20 +196,18 @@ mod tests {
     #[test]
     fn explicit_type_match() {
         let mut types = HashMap::new();
-        types.insert("note".to_string(), TypeDef {
-            name: "note".to_string(),
-            fields: IndexMap::new(),
-            description: None,
-            extends: None,
-            strict: None,
-            r#match: None,
-            path_pattern: None,
-            display_name_key: None,
-            resolved_fields: None,
-            body: String::new(),
-        });
+        types.insert(
+            "note".to_string(),
+            TypeDef {
+                name: "note".to_string(),
+                ..Default::default()
+            },
+        );
 
-        let frontmatter = fm(vec![("type", serde_yaml::Value::String("note".to_string()))]);
+        let frontmatter = fm(vec![(
+            "type",
+            serde_yaml::Value::String("note".to_string()),
+        )]);
         let matched = match_types(Path::new("test.md"), &frontmatter, &types, None);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "note");
@@ -224,11 +216,17 @@ mod tests {
     #[test]
     fn fields_present_match() {
         let mut types = HashMap::new();
-        types.insert("journal".to_string(), make_type_with_match("journal", MatchRule {
-            path_glob: None,
-            fields_present: Some(vec!["mood".to_string(), "weather".to_string()]),
-            r#where: None,
-        }));
+        types.insert(
+            "journal".to_string(),
+            make_type_with_match(
+                "journal",
+                MatchRule {
+                    path_glob: None,
+                    fields_present: Some(vec!["mood".to_string(), "weather".to_string()]),
+                    r#where: None,
+                },
+            ),
+        );
 
         let frontmatter = fm(vec![
             ("mood", serde_yaml::Value::String("good".to_string())),
@@ -241,11 +239,17 @@ mod tests {
     #[test]
     fn fields_present_no_match() {
         let mut types = HashMap::new();
-        types.insert("journal".to_string(), make_type_with_match("journal", MatchRule {
-            path_glob: None,
-            fields_present: Some(vec!["mood".to_string()]),
-            r#where: None,
-        }));
+        types.insert(
+            "journal".to_string(),
+            make_type_with_match(
+                "journal",
+                MatchRule {
+                    path_glob: None,
+                    fields_present: Some(vec!["mood".to_string()]),
+                    r#where: None,
+                },
+            ),
+        );
 
         let matched = match_types(Path::new("test.md"), &HashMap::new(), &types, None);
         assert!(matched.is_empty());
@@ -254,13 +258,24 @@ mod tests {
     #[test]
     fn path_glob_match() {
         let mut types = HashMap::new();
-        types.insert("journal".to_string(), make_type_with_match("journal", MatchRule {
-            path_glob: Some("journal/*.md".to_string()),
-            fields_present: None,
-            r#where: None,
-        }));
+        types.insert(
+            "journal".to_string(),
+            make_type_with_match(
+                "journal",
+                MatchRule {
+                    path_glob: Some("journal/*.md".to_string()),
+                    fields_present: None,
+                    r#where: None,
+                },
+            ),
+        );
 
-        let matched = match_types(Path::new("journal/2026-04-15.md"), &HashMap::new(), &types, None);
+        let matched = match_types(
+            Path::new("journal/2026-04-15.md"),
+            &HashMap::new(),
+            &types,
+            None,
+        );
         assert_eq!(matched.len(), 1);
     }
 }

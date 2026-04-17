@@ -44,10 +44,7 @@ pub fn result_set_to_array(rs: &QueryResultSet) -> Array {
         .iter()
         .map(|row| {
             let mut m = Map::new();
-            m.insert(
-                "path".into(),
-                Dynamic::from(row.path.display().to_string()),
-            );
+            m.insert("path".into(), Dynamic::from(row.path.display().to_string()));
             for (col, cell) in rs.columns.iter().zip(row.cells.iter()) {
                 m.insert(col.clone().into(), value_to_dynamic(cell));
             }
@@ -58,14 +55,13 @@ pub fn result_set_to_array(rs: &QueryResultSet) -> Array {
 
 pub fn note_to_map(note: &Note) -> Map {
     let mut m = Map::new();
-    m.insert("path".into(), Dynamic::from(note.path.display().to_string()));
+    m.insert(
+        "path".into(),
+        Dynamic::from(note.path.display().to_string()),
+    );
     m.insert("title".into(), Dynamic::from(note.title.clone()));
     m.insert("body".into(), Dynamic::from(note.body.clone()));
-    let tags: Array = note
-        .tags
-        .iter()
-        .map(|t| Dynamic::from(t.clone()))
-        .collect();
+    let tags: Array = note.tags.iter().map(|t| Dynamic::from(t.clone())).collect();
     m.insert("tags".into(), Dynamic::from(tags));
     m.insert(
         "frontmatter".into(),

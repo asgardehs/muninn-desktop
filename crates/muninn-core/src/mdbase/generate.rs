@@ -4,7 +4,12 @@ use super::types::TypeDef;
 
 /// Recognized generated field strategies.
 const VALID_STRATEGIES: &[&str] = &[
-    "now", "now_on_write", "uuid", "uuid_short", "slug", "counter",
+    "now",
+    "now_on_write",
+    "uuid",
+    "uuid_short",
+    "slug",
+    "counter",
 ];
 
 pub fn is_valid_strategy(s: &str) -> bool {
@@ -29,16 +34,10 @@ pub fn apply_generated(
 
         match strategy {
             "now" => {
-                frontmatter.insert(
-                    name.clone(),
-                    serde_yaml::Value::String(now.to_rfc3339()),
-                );
+                frontmatter.insert(name.clone(), serde_yaml::Value::String(now.to_rfc3339()));
             }
             "now_on_write" => {
-                frontmatter.insert(
-                    name.clone(),
-                    serde_yaml::Value::String(now.to_rfc3339()),
-                );
+                frontmatter.insert(name.clone(), serde_yaml::Value::String(now.to_rfc3339()));
             }
             "uuid" => {
                 if is_new && !frontmatter.contains_key(name) {
@@ -51,10 +50,8 @@ pub fn apply_generated(
             "uuid_short" => {
                 if is_new && !frontmatter.contains_key(name) {
                     let id = uuid::Uuid::new_v4().to_string();
-                    frontmatter.insert(
-                        name.clone(),
-                        serde_yaml::Value::String(id[..8].to_string()),
-                    );
+                    frontmatter
+                        .insert(name.clone(), serde_yaml::Value::String(id[..8].to_string()));
                 }
             }
             "slug" => {
@@ -78,8 +75,8 @@ pub fn apply_generated(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::FieldDef;
+    use super::*;
 
     fn make_type(fields: Vec<(&str, FieldDef)>) -> TypeDef {
         let mut field_map = IndexMap::new();
@@ -88,24 +85,20 @@ mod tests {
         }
         TypeDef {
             name: "test".to_string(),
-            description: None,
-            extends: None,
             fields: field_map,
-            strict: None,
-            r#match: None,
-            path_pattern: None,
-            display_name_key: None,
-            resolved_fields: None,
-            body: String::new(),
+            ..Default::default()
         }
     }
 
     #[test]
     fn uuid_generated_on_new() {
-        let td = make_type(vec![("id", FieldDef {
-            generated: Some("uuid".to_string()),
-            ..Default::default()
-        })]);
+        let td = make_type(vec![(
+            "id",
+            FieldDef {
+                generated: Some("uuid".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let mut fm = IndexMap::new();
         apply_generated(&mut fm, &td, true);
@@ -116,10 +109,13 @@ mod tests {
 
     #[test]
     fn uuid_not_generated_on_update() {
-        let td = make_type(vec![("id", FieldDef {
-            generated: Some("uuid".to_string()),
-            ..Default::default()
-        })]);
+        let td = make_type(vec![(
+            "id",
+            FieldDef {
+                generated: Some("uuid".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let mut fm = IndexMap::new();
         apply_generated(&mut fm, &td, false);
@@ -128,39 +124,57 @@ mod tests {
 
     #[test]
     fn uuid_not_overwritten() {
-        let td = make_type(vec![("id", FieldDef {
-            generated: Some("uuid".to_string()),
-            ..Default::default()
-        })]);
+        let td = make_type(vec![(
+            "id",
+            FieldDef {
+                generated: Some("uuid".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let mut fm = IndexMap::new();
-        fm.insert("id".to_string(), serde_yaml::Value::String("existing".to_string()));
+        fm.insert(
+            "id".to_string(),
+            serde_yaml::Value::String("existing".to_string()),
+        );
         apply_generated(&mut fm, &td, true);
         assert_eq!(fm["id"].as_str().unwrap(), "existing");
     }
 
     #[test]
     fn slug_from_title() {
-        let td = make_type(vec![("slug", FieldDef {
-            generated: Some("slug".to_string()),
-            ..Default::default()
-        })]);
+        let td = make_type(vec![(
+            "slug",
+            FieldDef {
+                generated: Some("slug".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let mut fm = IndexMap::new();
-        fm.insert("title".to_string(), serde_yaml::Value::String("My Test Note".to_string()));
+        fm.insert(
+            "title".to_string(),
+            serde_yaml::Value::String("My Test Note".to_string()),
+        );
         apply_generated(&mut fm, &td, true);
         assert_eq!(fm["slug"].as_str().unwrap(), "my-test-note");
     }
 
     #[test]
     fn now_on_write_always_updates() {
-        let td = make_type(vec![("updated", FieldDef {
-            generated: Some("now_on_write".to_string()),
-            ..Default::default()
-        })]);
+        let td = make_type(vec![(
+            "updated",
+            FieldDef {
+                generated: Some("now_on_write".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let mut fm = IndexMap::new();
-        fm.insert("updated".to_string(), serde_yaml::Value::String("old".to_string()));
+        fm.insert(
+            "updated".to_string(),
+            serde_yaml::Value::String("old".to_string()),
+        );
         apply_generated(&mut fm, &td, false);
         assert_ne!(fm["updated"].as_str().unwrap(), "old");
     }

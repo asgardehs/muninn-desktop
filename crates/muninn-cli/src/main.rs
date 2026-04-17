@@ -1,14 +1,15 @@
+mod cmd_backfill;
+mod cmd_export;
 mod cmd_init;
+mod cmd_lint;
 mod cmd_note;
+mod cmd_query;
+mod cmd_render;
+mod cmd_run;
+mod cmd_runestone;
 mod cmd_search;
 mod cmd_type;
 mod cmd_validate;
-mod cmd_lint;
-mod cmd_query;
-mod cmd_run;
-mod cmd_render;
-mod cmd_export;
-mod cmd_backfill;
 
 use std::path::PathBuf;
 use std::process;
@@ -16,7 +17,11 @@ use std::process;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "muninn", version, about = "Personal knowledge base and note management")]
+#[command(
+    name = "muninn",
+    version,
+    about = "Personal knowledge base and note management"
+)]
 struct Cli {
     /// Output as JSON where supported
     #[arg(long, global = true)]
@@ -48,6 +53,9 @@ enum Command {
     Run(cmd_run::RunArgs),
     /// Render a note with its `muninn` script blocks evaluated
     Render(cmd_render::RenderArgs),
+    /// Runestone management (list, show, eval)
+    #[command(subcommand)]
+    Runestone(cmd_runestone::RunestoneCommand),
     /// Export notes to PDF, HTML, DOCX, etc. (not yet implemented)
     Export(cmd_export::ExportArgs),
     /// Backfill generated/default fields (not yet implemented)
@@ -104,6 +112,10 @@ fn main() {
         Command::Render(args) => {
             let vault_path = resolve_vault_path();
             cmd_render::run(args, &vault_path, cli.json)
+        }
+        Command::Runestone(cmd) => {
+            let vault_path = resolve_vault_path();
+            cmd_runestone::run(cmd, &vault_path, cli.json)
         }
         Command::Export(args) => cmd_export::run(args),
         Command::Backfill(args) => cmd_backfill::run(args),

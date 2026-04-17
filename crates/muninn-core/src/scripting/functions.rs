@@ -70,7 +70,10 @@ fn register_notes(engine: &mut Engine, vault: Arc<Vault>) {
     let v = Arc::clone(&vault);
     engine.register_fn("notes", move |filter: Map| -> FnResult {
         let mut nf = NoteFilter::new();
-        if let Some(t) = filter.get("type").and_then(|d| d.clone().into_string().ok()) {
+        if let Some(t) = filter
+            .get("type")
+            .and_then(|d| d.clone().into_string().ok())
+        {
             nf = nf.with_type(&t);
         }
         if let Some(t) = filter.get("tag").and_then(|d| d.clone().into_string().ok()) {

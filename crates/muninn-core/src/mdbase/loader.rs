@@ -58,10 +58,7 @@ pub fn load_types(types_dir: &Path) -> Result<HashMap<String, TypeDef>, LoadErro
         let td = load_type_file(&path)?;
 
         // Validate name matches filename.
-        let expected_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let expected_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if td.name != expected_name {
             return Err(LoadError::NameMismatch {
                 name: td.name,

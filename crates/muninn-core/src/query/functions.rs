@@ -264,8 +264,14 @@ mod tests {
 
     #[test]
     fn lower_upper_null_pass_through() {
-        assert!(matches!(call_scalar("LOWER", &[Value::Null]).unwrap(), Value::Null));
-        assert!(matches!(call_scalar("UPPER", &[Value::Null]).unwrap(), Value::Null));
+        assert!(matches!(
+            call_scalar("LOWER", &[Value::Null]).unwrap(),
+            Value::Null
+        ));
+        assert!(matches!(
+            call_scalar("UPPER", &[Value::Null]).unwrap(),
+            Value::Null
+        ));
     }
 
     #[test]

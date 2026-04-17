@@ -86,7 +86,9 @@ fn rel_path(path: &Path, vault_path: &Path) -> String {
 }
 
 fn parse_field(s: &str) -> Result<(String, String), String> {
-    let pos = s.find('=').ok_or_else(|| format!("expected KEY=VALUE, got {:?}", s))?;
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got {:?}", s))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
@@ -121,9 +123,7 @@ fn run_new(args: NewArgs, vault_path: &Path) -> Result<()> {
         .create_note(&title, args.r#type.as_deref(), fields)
         .context("failed to create note")?;
 
-    let rel = path
-        .strip_prefix(vault_path)
-        .unwrap_or(&path);
+    let rel = path.strip_prefix(vault_path).unwrap_or(&path);
     println!("Created {}", rel.display());
 
     Ok(())

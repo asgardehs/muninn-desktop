@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use muninn_core::vault::{Vault, NoteFilter};
+use muninn_core::vault::{NoteFilter, Vault};
 
 fn test_vault_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +22,9 @@ fn open_vault() {
 #[test]
 fn read_note() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let note = vault.read_note(std::path::Path::new("projects/plant-ops.md")).unwrap();
+    let note = vault
+        .read_note(std::path::Path::new("projects/plant-ops.md"))
+        .unwrap();
     assert_eq!(note.title, "Plant Operations");
     assert!(note.tags.contains(&"safety".to_string()));
 }
@@ -32,13 +34,19 @@ fn list_all_notes() {
     let vault = Vault::open(test_vault_path()).unwrap();
     let notes = vault.list_notes(&NoteFilter::new()).unwrap();
     // Should find plant-ops, 2026-04-15, osha-standards (not _index.md)
-    assert!(notes.len() >= 3, "Expected at least 3 notes, got {}", notes.len());
+    assert!(
+        notes.len() >= 3,
+        "Expected at least 3 notes, got {}",
+        notes.len()
+    );
 }
 
 #[test]
 fn list_notes_filtered_by_type() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let notes = vault.list_notes(&NoteFilter::new().with_type("journal")).unwrap();
+    let notes = vault
+        .list_notes(&NoteFilter::new().with_type("journal"))
+        .unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "April 15, 2026");
 }
@@ -46,7 +54,9 @@ fn list_notes_filtered_by_type() {
 #[test]
 fn list_notes_filtered_by_tag() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let notes = vault.list_notes(&NoteFilter::new().with_tag("safety")).unwrap();
+    let notes = vault
+        .list_notes(&NoteFilter::new().with_tag("safety"))
+        .unwrap();
     assert!(notes.len() >= 2);
 }
 
@@ -70,9 +80,15 @@ fn search_with_filter() {
 #[test]
 fn validate_note() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let errors = vault.validate(std::path::Path::new("projects/plant-ops.md")).unwrap();
+    let errors = vault
+        .validate(std::path::Path::new("projects/plant-ops.md"))
+        .unwrap();
     // plant-ops has all required fields, should pass validation.
-    assert!(errors.is_empty(), "Unexpected validation errors: {:?}", errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+    assert!(
+        errors.is_empty(),
+        "Unexpected validation errors: {:?}",
+        errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -81,7 +97,11 @@ fn validate_all() {
     let results = vault.validate_all().unwrap();
     // No validation errors expected in the test vault.
     for (path, errors) in &results {
-        println!("{}: {:?}", path.display(), errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+        println!(
+            "{}: {:?}",
+            path.display(),
+            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -142,13 +162,12 @@ fn create_and_read_note() {
 
     // Create a minimal vault structure.
     std::fs::create_dir_all(vault_dir.join(".muninn/types")).unwrap();
-    std::fs::write(
-        vault_dir.join(".muninn/config.yaml"),
-        "name: temp-vault\n",
-    ).unwrap();
+    std::fs::write(vault_dir.join(".muninn/config.yaml"), "name: temp-vault\n").unwrap();
 
     let vault = Vault::open(&vault_dir).unwrap();
-    let path = vault.create_note("My Test Note", None, HashMap::new()).unwrap();
+    let path = vault
+        .create_note("My Test Note", None, HashMap::new())
+        .unwrap();
 
     assert!(path.exists());
     let note = vault.read_note(&path).unwrap();
@@ -173,6 +192,13 @@ fn custom_dictionary() {
     let checker = muninn_core::grammar::GrammarChecker::new(Some(&dict_path));
     // "muninn" is in the custom dictionary, so it shouldn't be flagged as misspelled.
     let diags = checker.check("The muninn system is running.");
-    let muninn_flags: Vec<_> = diags.iter().filter(|d| d.message.to_lowercase().contains("muninn")).collect();
-    assert!(muninn_flags.is_empty(), "muninn should not be flagged: {:?}", muninn_flags);
+    let muninn_flags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.to_lowercase().contains("muninn"))
+        .collect();
+    assert!(
+        muninn_flags.is_empty(),
+        "muninn should not be flagged: {:?}",
+        muninn_flags
+    );
 }

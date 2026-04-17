@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use colored::Colorize;
 
-use muninn_core::vault::Vault;
 use muninn_core::mdbase::validate::Severity;
+use muninn_core::vault::Vault;
 
 #[derive(Args)]
 pub struct ValidateArgs {
@@ -81,7 +81,9 @@ pub fn run(args: ValidateArgs, vault_path: &Path, json: bool) -> Result<()> {
     println!();
     println!(
         "{} error(s), {} warning(s) in {} file(s)",
-        error_count, warn_count, results.len()
+        error_count,
+        warn_count,
+        results.len()
     );
 
     if error_count > 0 {

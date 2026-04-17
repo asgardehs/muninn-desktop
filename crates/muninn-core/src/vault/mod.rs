@@ -1,5 +1,5 @@
-mod search;
 mod list;
+mod search;
 mod tags;
 
 use std::collections::HashMap;
@@ -15,8 +15,8 @@ use crate::mdbase::types::TypeDef;
 use crate::mdbase::validate::ValidationError;
 use crate::wikilink::WikilinkIndex;
 
-pub use search::{SearchResult, search_notes};
 pub use list::{NoteFilter, NoteSummary};
+pub use search::{SearchResult, search_notes};
 pub use tags::TagCount;
 
 #[derive(Debug, Error)]
@@ -127,10 +127,16 @@ impl Vault {
         let path = self.root.join(&filename);
 
         let mut frontmatter = indexmap::IndexMap::new();
-        frontmatter.insert("title".to_string(), serde_yaml::Value::String(title.to_string()));
+        frontmatter.insert(
+            "title".to_string(),
+            serde_yaml::Value::String(title.to_string()),
+        );
 
         if let Some(tn) = type_name {
-            frontmatter.insert("type".to_string(), serde_yaml::Value::String(tn.to_string()));
+            frontmatter.insert(
+                "type".to_string(),
+                serde_yaml::Value::String(tn.to_string()),
+            );
         }
 
         for (k, v) in fields {
@@ -139,12 +145,13 @@ impl Vault {
 
         // Apply generated fields if we have a type.
         if let Some(tn) = type_name
-            && let Some(td) = self.types.get(tn) {
-                crate::mdbase::generate::apply_generated(&mut frontmatter, td, true);
-            }
+            && let Some(td) = self.types.get(tn)
+        {
+            crate::mdbase::generate::apply_generated(&mut frontmatter, td, true);
+        }
 
-        let yaml = serde_yaml::to_string(&frontmatter)
-            .map_err(|e| VaultError::Mdbase(e.to_string()))?;
+        let yaml =
+            serde_yaml::to_string(&frontmatter).map_err(|e| VaultError::Mdbase(e.to_string()))?;
 
         let content = format!("---\n{}---\n", yaml);
         std::fs::write(&path, content)?;
@@ -192,7 +199,8 @@ impl Vault {
     pub fn search(&self, query: &str, filter: Option<&NoteFilter>) -> Result<Vec<SearchResult>> {
         let notes = self.read_all_notes()?;
         let filtered: Vec<Note> = if let Some(f) = filter {
-            notes.into_iter()
+            notes
+                .into_iter()
                 .filter(|n| f.matches(&n.frontmatter, &n.title, &n.tags))
                 .collect()
         } else {
@@ -209,7 +217,11 @@ impl Vault {
             .map(|n| NoteSummary {
                 path: n.path,
                 title: n.title,
-                note_type: n.frontmatter.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                note_type: n
+                    .frontmatter
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 tags: n.tags,
             })
             .collect();
@@ -303,9 +315,7 @@ impl Vault {
     }
 
     fn relative_path(&self, path: &Path) -> PathBuf {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_path_buf()
+        path.strip_prefix(&self.root).unwrap_or(path).to_path_buf()
     }
 
     fn list_note_paths(&self) -> Result<Vec<PathBuf>> {
@@ -313,6 +323,9 @@ impl Vault {
         for entry in walkdir::WalkDir::new(&self.root)
             .into_iter()
             .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
                 let name = e.file_name().to_str().unwrap_or("");
                 // Skip .muninn and _attachments directories.
                 !name.starts_with('.') && name != "_attachments"

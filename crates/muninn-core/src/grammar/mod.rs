@@ -1,5 +1,5 @@
 mod checker;
 mod dictionary;
 
-pub use checker::{GrammarChecker, GrammarDiagnostic, DiagnosticSeverity};
+pub use checker::{DiagnosticSeverity, GrammarChecker, GrammarDiagnostic};
 pub use dictionary::Dictionary;

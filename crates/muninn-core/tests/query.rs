@@ -16,7 +16,11 @@ fn test_vault_path() -> PathBuf {
 fn query_any_type_source() {
     let vault = Vault::open(test_vault_path()).unwrap();
     let rs = vault.query("SELECT title FROM note").unwrap();
-    assert!(rs.rows.len() >= 3, "expected at least 3 notes, got {}", rs.rows.len());
+    assert!(
+        rs.rows.len() >= 3,
+        "expected at least 3 notes, got {}",
+        rs.rows.len()
+    );
     assert_eq!(rs.columns, vec!["title"]);
 }
 
@@ -36,7 +40,9 @@ fn query_filters_by_status() {
 #[test]
 fn query_order_by_title() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let rs = vault.query("SELECT title FROM note ORDER BY title ASC").unwrap();
+    let rs = vault
+        .query("SELECT title FROM note ORDER BY title ASC")
+        .unwrap();
     let titles: Vec<String> = rs
         .rows
         .iter()
@@ -53,18 +59,25 @@ fn query_order_by_title() {
 #[test]
 fn query_limit_and_offset() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let full = vault.query("SELECT title FROM note ORDER BY title").unwrap();
+    let full = vault
+        .query("SELECT title FROM note ORDER BY title")
+        .unwrap();
     let limited = vault
         .query("SELECT title FROM note ORDER BY title LIMIT 1 OFFSET 1")
         .unwrap();
     assert_eq!(limited.rows.len(), 1);
-    assert_eq!(limited.rows[0].cells[0].to_string(), full.rows[1].cells[0].to_string());
+    assert_eq!(
+        limited.rows[0].cells[0].to_string(),
+        full.rows[1].cells[0].to_string()
+    );
 }
 
 #[test]
 fn query_unknown_type_errors() {
     let vault = Vault::open(test_vault_path()).unwrap();
-    let err = vault.query("SELECT title FROM nonexistent_type").unwrap_err();
+    let err = vault
+        .query("SELECT title FROM nonexistent_type")
+        .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("unknown type") || msg.contains("nonexistent_type"));
 }

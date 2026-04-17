@@ -76,7 +76,10 @@ pub fn run(args: LintArgs, vault_path: &Path, json: bool) -> Result<()> {
                     muninn_core::grammar::DiagnosticSeverity::Error => "error".red().bold(),
                     muninn_core::grammar::DiagnosticSeverity::Warning => "warn".yellow().bold(),
                 };
-                print!("  {} [{}..{}] {}", severity_str, d.span.start, d.span.end, d.message);
+                print!(
+                    "  {} [{}..{}] {}",
+                    severity_str, d.span.start, d.span.end, d.message
+                );
                 if !d.suggestions.is_empty() {
                     print!(" (suggest: {})", d.suggestions.join(", "));
                 }

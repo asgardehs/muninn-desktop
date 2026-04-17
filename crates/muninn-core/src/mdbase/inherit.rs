@@ -48,7 +48,10 @@ fn topological_sort(types: &HashMap<String, TypeDef>) -> Result<Vec<String>, Str
         Visited,
     }
 
-    let mut state: HashMap<String, State> = types.keys().map(|k| (k.clone(), State::Unvisited)).collect();
+    let mut state: HashMap<String, State> = types
+        .keys()
+        .map(|k| (k.clone(), State::Unvisited))
+        .collect();
     let mut order = Vec::with_capacity(types.len());
 
     fn visit(
@@ -60,7 +63,10 @@ fn topological_sort(types: &HashMap<String, TypeDef>) -> Result<Vec<String>, Str
         match state.get(name) {
             Some(State::Visited) => return Ok(()),
             Some(State::Visiting) => {
-                return Err(format!("inheritance cycle detected involving type {:?}", name));
+                return Err(format!(
+                    "inheritance cycle detected involving type {:?}",
+                    name
+                ));
             }
             _ => {}
         }
@@ -69,10 +75,11 @@ fn topological_sort(types: &HashMap<String, TypeDef>) -> Result<Vec<String>, Str
 
         if let Some(td) = types.get(name)
             && let Some(ref parent) = td.extends
-                && types.contains_key(parent) {
-                    visit(parent, types, state, order)?;
-                }
-                // If parent doesn't exist, we'll catch it during resolution.
+            && types.contains_key(parent)
+        {
+            visit(parent, types, state, order)?;
+        }
+        // If parent doesn't exist, we'll catch it during resolution.
 
         state.insert(name.to_string(), State::Visited);
         order.push(name.to_string());
@@ -91,8 +98,8 @@ fn topological_sort(types: &HashMap<String, TypeDef>) -> Result<Vec<String>, Str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::FieldDef;
+    use super::*;
     use indexmap::IndexMap;
 
     fn make_type(name: &str, extends: Option<&str>, fields: Vec<(&str, FieldDef)>) -> TypeDef {
@@ -102,15 +109,9 @@ mod tests {
         }
         TypeDef {
             name: name.to_string(),
-            description: None,
             extends: extends.map(|s| s.to_string()),
             fields: field_map,
-            strict: None,
-            r#match: None,
-            path_pattern: None,
-            display_name_key: None,
-            resolved_fields: None,
-            body: String::new(),
+            ..Default::default()
         }
     }
 

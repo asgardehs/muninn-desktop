@@ -76,9 +76,7 @@ fn link_wikilink_format() {
 
 #[test]
 fn json_serializes_map() {
-    let out = engine()
-        .run(r#"print(json(#{ a: 1, b: "x" }));"#)
-        .unwrap();
+    let out = engine().run(r#"print(json(#{ a: 1, b: "x" }));"#).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(out.text.trim()).unwrap();
     assert_eq!(parsed["a"], 1);
     assert_eq!(parsed["b"], "x");
@@ -118,9 +116,7 @@ fn runestone_stub_errors_with_phase_5_message() {
 
 #[test]
 fn note_missing_returns_error() {
-    let err = engine()
-        .run(r#"note("does-not-exist.md");"#)
-        .unwrap_err();
+    let err = engine().run(r#"note("does-not-exist.md");"#).unwrap_err();
     let msg = err.to_string().to_lowercase();
     assert!(msg.contains("not found") || msg.contains("no such"));
 }
@@ -175,7 +171,8 @@ fn types_function_lists_defined_types() {
 
 #[test]
 fn render_replaces_muninn_block_with_output() {
-    let source = "# Hello\n\nBefore block.\n\n```muninn\nprint(\"from script\");\n```\n\nAfter block.\n";
+    let source =
+        "# Hello\n\nBefore block.\n\n```muninn\nprint(\"from script\");\n```\n\nAfter block.\n";
     let rendered = engine().render(source, RenderErrorBehavior::Abort).unwrap();
     assert!(rendered.contains("from script"));
     assert!(!rendered.contains("```muninn"));

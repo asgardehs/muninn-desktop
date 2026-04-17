@@ -48,10 +48,7 @@ impl ScriptEngine {
         } else {
             None
         };
-        Self {
-            vault,
-            scripts_dir,
-        }
+        Self { vault, scripts_dir }
     }
 
     /// Override the module resolver directory (used in tests).
@@ -127,10 +124,7 @@ fn classify_error(
     {
         return Err(ScriptError::Timeout(TIMEOUT_SECS));
     }
-    if matches!(
-        *e,
-        rhai::EvalAltResult::ErrorParsing(_, _)
-    ) {
+    if matches!(*e, rhai::EvalAltResult::ErrorParsing(_, _)) {
         return Err(ScriptError::Parse(e.to_string()));
     }
     Err(ScriptError::Eval(e.to_string()))

@@ -1,7 +1,7 @@
 pub mod config;
-pub mod types;
-pub mod loader;
-pub mod validate;
-pub mod match_type;
-pub mod inherit;
 pub mod generate;
+pub mod inherit;
+pub mod loader;
+pub mod match_type;
+pub mod types;
+pub mod validate;

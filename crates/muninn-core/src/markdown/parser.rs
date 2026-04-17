@@ -63,7 +63,9 @@ pub fn extract_frontmatter(source: &str) -> (String, String) {
     // The opening --- must be followed by a newline (or be exactly "---\n").
     let after_open = match after_open.strip_prefix('\n') {
         Some(rest) => rest,
-        None if after_open.starts_with('\r') => after_open.strip_prefix("\r\n").unwrap_or(after_open),
+        None if after_open.starts_with('\r') => {
+            after_open.strip_prefix("\r\n").unwrap_or(after_open)
+        }
         _ => return (String::new(), source.to_string()),
     };
 
@@ -72,9 +74,7 @@ pub fn extract_frontmatter(source: &str) -> (String, String) {
         let frontmatter = after_open[..pos].to_string();
         let rest = &after_open[pos..];
         // Skip past the closing --- and its newline.
-        let body = rest
-            .strip_prefix("---")
-            .unwrap_or(rest);
+        let body = rest.strip_prefix("---").unwrap_or(rest);
         let body = body
             .strip_prefix('\n')
             .or_else(|| body.strip_prefix("\r\n"))
@@ -101,9 +101,10 @@ fn find_closing_delimiter(s: &str) -> Option<usize> {
 fn extract_title(frontmatter: &HashMap<String, serde_yaml::Value>, body: &str) -> String {
     // Try frontmatter "title" field first.
     if let Some(serde_yaml::Value::String(title)) = frontmatter.get("title")
-        && !title.is_empty() {
-            return title.clone();
-        }
+        && !title.is_empty()
+    {
+        return title.clone();
+    }
 
     // Fall back to first # heading in body.
     for line in body.lines() {
@@ -121,17 +122,19 @@ fn extract_title(frontmatter: &HashMap<String, serde_yaml::Value>, body: &str) -
 
 fn extract_tags(frontmatter: &HashMap<String, serde_yaml::Value>) -> Vec<String> {
     match frontmatter.get("tags") {
-        Some(serde_yaml::Value::Sequence(seq)) => {
-            seq.iter()
-                .filter_map(|v| match v {
-                    serde_yaml::Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
+        Some(serde_yaml::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| match v {
+                serde_yaml::Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
         Some(serde_yaml::Value::String(s)) => {
             // Support comma-separated string form.
-            s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
         }
         _ => Vec::new(),
     }
@@ -143,7 +146,8 @@ mod tests {
 
     #[test]
     fn parse_note_with_frontmatter() {
-        let content = "---\ntitle: Test Note\ntags:\n  - rust\n  - test\n---\n# Content\n\nSome body text.\n";
+        let content =
+            "---\ntitle: Test Note\ntags:\n  - rust\n  - test\n---\n# Content\n\nSome body text.\n";
         let note = parse_document(Path::new("test.md"), content).unwrap();
         assert_eq!(note.title, "Test Note");
         assert_eq!(note.tags, vec!["rust", "test"]);

@@ -99,7 +99,10 @@ impl GrammarChecker {
     }
 
     /// Add a word to the custom dictionary.
-    pub fn add_to_dictionary(&mut self, word: &str) -> Result<(), super::dictionary::DictionaryError> {
+    pub fn add_to_dictionary(
+        &mut self,
+        word: &str,
+    ) -> Result<(), super::dictionary::DictionaryError> {
         self.custom_dict.add(word)
     }
 }

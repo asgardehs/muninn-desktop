@@ -15,9 +15,7 @@ use super::{RenderErrorBehavior, ScriptEngine, ScriptError};
 /// line. Non-greedy so consecutive blocks don't merge.
 fn block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?ms)^```muninn[^\S\n]*\n(.*?)\n```[^\S\n]*$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?ms)^```muninn[^\S\n]*\n(.*?)\n```[^\S\n]*$").unwrap())
 }
 
 impl ScriptEngine {

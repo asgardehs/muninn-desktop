@@ -55,21 +55,18 @@ impl WikilinkIndex {
 
     /// Get all wikilinks in the given source file.
     pub fn forward_links(&self, source_file: &Path) -> &[WikiLink] {
-        self.forward.get(source_file).map(|v| v.as_slice()).unwrap_or(&[])
+        self.forward
+            .get(source_file)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Get all files that link to the given target name.
     pub fn backlinks_for(&self, target: &Path) -> Vec<PathBuf> {
-        let target_name = target
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let target_name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let normalized = normalize_target(target_name);
 
-        self.backlinks
-            .get(&normalized)
-            .cloned()
-            .unwrap_or_default()
+        self.backlinks.get(&normalized).cloned().unwrap_or_default()
     }
 
     /// Get all files that link to the given normalized target string.
@@ -113,8 +110,8 @@ impl Default for WikilinkIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::extract;
+    use super::*;
 
     #[test]
     fn update_and_query_forward() {
