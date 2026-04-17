@@ -1,3 +1,4 @@
+pub mod api;
 pub mod grammar;
 pub mod markdown;
 pub mod mdbase;

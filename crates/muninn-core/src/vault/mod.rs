@@ -240,10 +240,85 @@ impl Vault {
         Ok(rs)
     }
 
+    /// Full replace: write `{frontmatter}` + `{body}` to the given note
+    /// path, creating the file if it doesn't exist. Callers should
+    /// generally use `create_note` for first-time creation (it applies
+    /// generated-field strategies) and reserve this for updates.
+    pub fn write_note(
+        &self,
+        path: &Path,
+        frontmatter: &indexmap::IndexMap<String, serde_yaml::Value>,
+        body: &str,
+    ) -> Result<PathBuf> {
+        let abs = self.resolve(path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let fm_yaml = if frontmatter.is_empty() {
+            String::new()
+        } else {
+            serde_yaml::to_string(frontmatter).map_err(|e| VaultError::Mdbase(e.to_string()))?
+        };
+        let content = if fm_yaml.is_empty() {
+            body.to_string()
+        } else {
+            format!("---\n{fm_yaml}---\n{body}")
+        };
+        std::fs::write(&abs, content)?;
+
+        // Refresh wikilink index for this file so /api/links reflects the
+        // write immediately.
+        if let Ok(text) = std::fs::read_to_string(&abs) {
+            let links = crate::wikilink::extract(&text);
+            let rel = self.relative_path(&abs);
+            self.wikilinks.write().update(rel, links);
+        }
+
+        Ok(abs)
+    }
+
+    /// Delete a note by relative or absolute path. Removes the file and
+    /// evicts it from the wikilink index.
+    pub fn delete_note(&self, path: &Path) -> Result<()> {
+        let abs = self.resolve(path);
+        if !abs.exists() {
+            return Err(VaultError::NoteNotFound(abs));
+        }
+        std::fs::remove_file(&abs)?;
+        let rel = self.relative_path(&abs);
+        self.wikilinks.write().remove(&rel);
+        Ok(())
+    }
+
+    fn resolve(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        }
+    }
+
     pub fn backlinks(&self, path: &Path) -> Vec<PathBuf> {
         let index = self.wikilinks.read();
         let rel_path = self.relative_path(path);
         index.backlinks_for(&rel_path)
+    }
+
+    /// Full wikilink graph as `(source, target_strings)` pairs. Targets are
+    /// the raw `[[link]]` target strings — unresolved and may not correspond
+    /// to existing notes.
+    pub fn link_graph(&self) -> Vec<(PathBuf, Vec<String>)> {
+        let index = self.wikilinks.read();
+        index
+            .sources()
+            .into_iter()
+            .map(|src| {
+                let links = index.forward_links(src);
+                let targets: Vec<String> = links.iter().map(|l| l.target.clone()).collect();
+                (src.clone(), targets)
+            })
+            .collect()
     }
 
     pub fn rename_note(&self, from: &Path, new_title: &str) -> Result<RenameResult> {

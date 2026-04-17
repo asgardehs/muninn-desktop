@@ -1,0 +1,24 @@
+[package]
+name = "muninn-server"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone HTTP API server for Muninn vaults"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "muninn-server"
+path = "src/main.rs"
+
+[dependencies]
+muninn-core = { path = "../muninn-core" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tempfile = "3"
