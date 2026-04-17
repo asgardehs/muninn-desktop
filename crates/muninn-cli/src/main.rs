@@ -5,6 +5,8 @@ mod cmd_type;
 mod cmd_validate;
 mod cmd_lint;
 mod cmd_query;
+mod cmd_run;
+mod cmd_render;
 mod cmd_export;
 mod cmd_backfill;
 
@@ -42,6 +44,10 @@ enum Command {
     Lint(cmd_lint::LintArgs),
     /// Run SQL queries over notes
     Query(cmd_query::QueryArgs),
+    /// Run a .rhai script against the vault
+    Run(cmd_run::RunArgs),
+    /// Render a note with its `muninn` script blocks evaluated
+    Render(cmd_render::RenderArgs),
     /// Export notes to PDF, HTML, DOCX, etc. (not yet implemented)
     Export(cmd_export::ExportArgs),
     /// Backfill generated/default fields (not yet implemented)
@@ -90,6 +96,14 @@ fn main() {
         Command::Query(args) => {
             let vault_path = resolve_vault_path();
             cmd_query::run(args, &vault_path, cli.json)
+        }
+        Command::Run(args) => {
+            let vault_path = resolve_vault_path();
+            cmd_run::run(args, &vault_path, cli.json)
+        }
+        Command::Render(args) => {
+            let vault_path = resolve_vault_path();
+            cmd_render::run(args, &vault_path, cli.json)
         }
         Command::Export(args) => cmd_export::run(args),
         Command::Backfill(args) => cmd_backfill::run(args),

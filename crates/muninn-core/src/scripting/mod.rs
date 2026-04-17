@@ -11,6 +11,7 @@
 pub mod bridge;
 pub mod engine;
 pub mod functions;
+pub mod render;
 
 pub use engine::{ScriptEngine, ScriptError, ScriptOutput};
 

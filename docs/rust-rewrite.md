@@ -177,11 +177,11 @@ muninn/
 │   │       │   ├── frontmatter.rs # YAML deserialization
 │   │       │   └── heading.rs    # heading extraction
 │   │       ├── scripting/
-│   │       │   ├── mod.rs
-│   │       │   ├── engine.rs     # Rhai engine setup + vault API registration
+│   │       │   ├── mod.rs        # ScriptEngine, ScriptOutput, RenderErrorBehavior
+│   │       │   ├── engine.rs     # Rhai engine setup, limits, FileModuleResolver
+│   │       │   ├── bridge.rs     # query::Value ↔ rhai::Dynamic conversions
 │   │       │   ├── functions.rs  # query(), search(), note(), table(), etc.
-│   │       │   ├── render.rs     # execute script blocks within a note
-│   │       │   └── loader.rs     # .muninn/scripts/*.rhai file loading
+│   │       │   └── render.rs     # execute `muninn` code blocks within a note
 │   │       ├── export/
 │   │       │   ├── mod.rs
 │   │       │   ├── pipeline.rs   # resolve links → eval scripts → emit output
@@ -654,6 +654,18 @@ import "weekly-summary"
   between blocks or between renders
 - Resource limits: max 1M operations, max 64 call stack depth, 5 second
   timeout
+
+**Render error behavior:** `ScriptEngine::render(source, on_error)` takes a
+`RenderErrorBehavior` enum controlling what happens when a `muninn` block
+fails:
+
+- `Abort` — first failing block short-circuits `render` with an error. Used by
+  the `muninn render` CLI (override with `--continue-on-error`) and the HTTP
+  render endpoint.
+- `ReplaceBlock` — the failing block is replaced in-place with a
+  `muninn-error` fenced block containing the error message; remaining blocks
+  still render. Used by the Tauri live preview (Phase 7) so one broken block
+  doesn't blank the whole note while the user is editing.
 
 **Why not JavaScript?**
 
@@ -1903,7 +1915,7 @@ does not affect CLI behavior.
 | 1 | `muninn-core` — vault, markdown, wikilink (with folder links + attachments), mdbase (types + validation), grammar (harper-core) | Library with full vault operations, type system, folder wikilinks, attachment linking, and grammar checking |
 | 2 | `muninn-cli` — clap commands over core | Working CLI, feature parity with Go version + mdbase + folder links |
 | 3 | `muninn-core` — query module (SQL parser + evaluator, `Vault::query`, CLI `muninn query`) | Structured queries via CLI; JOINs and `computed:` fields deferred to Phase 5 |
-| 4 | `muninn-core` — scripting module (Rhai engine + vault API) | Inline script blocks, CLI `muninn run` / `muninn render` |
+| 4 | `muninn-core` — scripting module (Rhai engine, read-only vault API, `ScriptEngine::render` with Abort / ReplaceBlock behavior), CLI `muninn run` / `muninn render` | Inline script blocks evaluated in notes; `.muninn/scripts/*.rhai` imports work |
 | 5 | `muninn-core` — runestones module + API (axum) | Relational views + HTTP access for Asgard tools |
 | 6 | `muninn-core` — export module (pandoc + Quarto pipeline) + zotero module (Web API v3 + HTTP citing) | Document export via CLI, `.qmd` as a note type, Zotero citation search + bibliography export |
 | 7 | `muninn-tauri` — Tauri shell + React frontend (editor, search, list) | Desktop app MVP with script blocks, attachment embeds, export button, citation picker |

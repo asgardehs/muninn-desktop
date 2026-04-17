@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use muninn_core::scripting::ScriptEngine;
+use muninn_core::scripting::{RenderErrorBehavior, ScriptEngine};
 use muninn_core::vault::Vault;
 
 fn test_vault_path() -> PathBuf {
@@ -171,4 +171,74 @@ fn types_function_lists_defined_types() {
         .parse()
         .unwrap();
     assert!(n >= 1);
+}
+
+#[test]
+fn render_replaces_muninn_block_with_output() {
+    let source = "# Hello\n\nBefore block.\n\n```muninn\nprint(\"from script\");\n```\n\nAfter block.\n";
+    let rendered = engine().render(source, RenderErrorBehavior::Abort).unwrap();
+    assert!(rendered.contains("from script"));
+    assert!(!rendered.contains("```muninn"));
+    assert!(rendered.contains("Before block."));
+    assert!(rendered.contains("After block."));
+}
+
+#[test]
+fn render_leaves_other_code_blocks_untouched() {
+    let source = "```rust\nfn main() {}\n```\n\n```muninn\nprint(\"x\");\n```\n";
+    let rendered = engine().render(source, RenderErrorBehavior::Abort).unwrap();
+    assert!(rendered.contains("```rust"));
+    assert!(rendered.contains("fn main() {}"));
+    assert!(!rendered.contains("```muninn\nprint"));
+}
+
+#[test]
+fn render_abort_on_error_stops() {
+    let source = "```muninn\nthis is not valid rhai @@@\n```\n";
+    let err = engine()
+        .render(source, RenderErrorBehavior::Abort)
+        .unwrap_err();
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn render_replace_block_keeps_going() {
+    let source = "start\n\n```muninn\nbroken @@@\n```\n\n```muninn\nprint(\"ok\");\n```\n\nend\n";
+    let rendered = engine()
+        .render(source, RenderErrorBehavior::ReplaceBlock)
+        .unwrap();
+    assert!(rendered.contains("```muninn-error"));
+    assert!(rendered.contains("ok"));
+    assert!(rendered.contains("start"));
+    assert!(rendered.contains("end"));
+}
+
+#[test]
+fn render_multiple_blocks() {
+    let source = "```muninn\nprint(\"a\");\n```\n\n```muninn\nprint(\"b\");\n```\n";
+    let rendered = engine().render(source, RenderErrorBehavior::Abort).unwrap();
+    assert!(rendered.contains("a"));
+    assert!(rendered.contains("b"));
+}
+
+#[test]
+fn import_from_scripts_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let vault_dir = tmp.path();
+
+    std::fs::create_dir_all(vault_dir.join(".muninn/types")).unwrap();
+    std::fs::create_dir_all(vault_dir.join(".muninn/scripts")).unwrap();
+    std::fs::write(vault_dir.join(".muninn/config.yaml"), "name: t\n").unwrap();
+    std::fs::write(
+        vault_dir.join(".muninn/scripts/greet.rhai"),
+        r#"fn hello() { "hi from module" }"#,
+    )
+    .unwrap();
+
+    let vault = Arc::new(Vault::open(vault_dir).unwrap());
+    let engine = ScriptEngine::new(vault);
+    let out = engine
+        .run(r#"import "greet" as g; print(g::hello());"#)
+        .unwrap();
+    assert_eq!(out.text.trim(), "hi from module");
 }
