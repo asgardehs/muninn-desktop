@@ -1916,7 +1916,7 @@ does not affect CLI behavior.
 | 2 | `muninn-cli` — clap commands over core | Working CLI, feature parity with Go version + mdbase + folder links |
 | 3 | `muninn-core` — query module (SQL parser + evaluator, `Vault::query`, CLI `muninn query`) | Structured queries via CLI; JOINs and `computed:` fields deferred to Phase 5 |
 | 4 | `muninn-core` — scripting module (Rhai engine, read-only vault API, `ScriptEngine::render` with Abort / ReplaceBlock behavior), CLI `muninn run` / `muninn render` | Inline script blocks evaluated in notes; `.muninn/scripts/*.rhai` imports work |
-| 5 | `muninn-core` — runestones module + API (axum) | Relational views + HTTP access for Asgard tools |
+| 5 | `muninn-core` — runestones module + API (axum), `muninn-server` binary; JOINs (INNER + LEFT, self-joins), `TypeDef.computed` fields, `query::Value` → YAML writeback | Relational views + HTTP access for Asgard tools. **Shipped.** |
 | 6 | `muninn-core` — export module (pandoc + Quarto pipeline) + zotero module (Web API v3 + HTTP citing) | Document export via CLI, `.qmd` as a note type, Zotero citation search + bibliography export |
 | 7 | `muninn-tauri` — Tauri shell + React frontend (editor, search, list) | Desktop app MVP with script blocks, attachment embeds, export button, citation picker |
 | 8 | `muninn-tauri` — Runestones view, graph view (with folders), query UI, type manager | Full desktop feature set |

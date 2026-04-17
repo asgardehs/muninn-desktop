@@ -21,11 +21,13 @@ check, and a desktop app built in.
 
 - [Command Reference](/docs/muninn/commands/) — every CLI subcommand at a glance
 - [Notes](/docs/muninn/notes/) — create, list, search, wikilinks, folder links, attachments
-- [Types](/docs/muninn/types/) — mdbase type definitions, validation, inheritance
+- [Types](/docs/muninn/types/) — mdbase type definitions, validation, inheritance, computed fields
 - [Query](/docs/muninn/query/) — SQL over frontmatter with `muninn query`
+- [Runestones](/docs/muninn/runestones/) — saved relational views over typed notes
 - [Scripting](/docs/muninn/scripting/) — Rhai script blocks and `.rhai` files
 - [Search](/docs/muninn/search/) — text search across your vault
 - [Lint](/docs/muninn/lint/) — grammar and spell check
+- [HTTP API](/docs/muninn/http-api/) — the `muninn-server` binary and its JSON endpoints
 
 Muninn is part of the [Asgard EHS ecosystem](/). It's designed to stand
-alone but integrates with Huginn and Odin through a local HTTP API.
+alone but integrates with Huginn and Odin through the local HTTP API.

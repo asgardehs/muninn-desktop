@@ -80,6 +80,42 @@ LIMIT 10 OFFSET 20
 SELECT UPPER(title) AS t FROM note ORDER BY t
 ```
 
+### Join across types
+
+Give each `FROM` source an alias and reference columns via `alias.column`.
+Bare column names still resolve against the primary (first) alias.
+
+```sql
+SELECT t.title, p.title, p.status
+FROM task t JOIN project p ON t.project = p.path
+WHERE t.status = 'active'
+```
+
+`LEFT JOIN` keeps rows from the left side even when nothing on the
+right matches — the right-side columns come back as NULL, which pairs
+well with `IS NULL` to find orphans:
+
+```sql
+SELECT t.title
+FROM task t LEFT JOIN project p ON t.project = p.path
+WHERE p.title IS NULL
+```
+
+Self-joins work: alias the same type twice and join by whichever link
+field points between them. A common pattern is rolling up a parent
+note's fields onto its children:
+
+```sql
+SELECT a.title, b.title AS parent_title, b.status AS parent_status
+FROM task a JOIN task b ON a.parent = b.path
+```
+
+Join keys are standard SQL equality over whatever is in the
+frontmatter. If your link fields hold wikilink text like
+`[[other-note]]`, store the resolved path (`other-note.md`) instead so
+`ON a.parent = b.path` matches — wikilink-aware resolution is not
+wired into joins yet.
+
 ### Group and aggregate
 
 ```sql
@@ -95,7 +131,8 @@ ORDER BY n DESC
 | Clause           | Notes                                                  |
 | ---------------- | ------------------------------------------------------ |
 | `SELECT`         | Columns, expressions, aliases, `*`                     |
-| `FROM`           | A single type name or the synthetic `note` source      |
+| `FROM`           | A type name with optional alias, or the synthetic `note` source |
+| `JOIN ... ON`    | `INNER` and `LEFT`; self-joins via aliases             |
 | `WHERE`          | Row filter                                             |
 | `GROUP BY`       | Aggregate by one or more expressions                   |
 | `HAVING`         | Filter on aggregates                                   |
@@ -104,9 +141,7 @@ ORDER BY n DESC
 
 Not supported in this version:
 
-- **`JOIN`** — coming with Runestones when cross-type link semantics
-  land. Until then, use scripting if you need to weave results from
-  multiple queries.
+- **`JOIN USING`, `NATURAL JOIN`, `RIGHT`, `FULL`** — use `JOIN ... ON` explicitly.
 - **Subqueries** — no `SELECT ... WHERE x IN (SELECT ...)`.
 - **`UNION`, `INTERSECT`, `EXCEPT`** — no set operations.
 - **DDL / DML** — `CREATE`, `INSERT`, `UPDATE`, `DELETE` are all
@@ -123,6 +158,11 @@ synthetic columns are available on every note:
 | `path`  | Vault-relative path to the note               |
 | `title` | The note's resolved title                     |
 | `tags`  | The note's tag list (as a list value)         |
+
+If a type defines [computed fields](/docs/muninn/types/#computed-fields),
+those appear as columns too — referenced the same way as real
+frontmatter. Computed fields re-evaluate per row, so they compose with
+`WHERE`, `ORDER BY`, and `SELECT` expressions.
 
 ## Scalar functions
 

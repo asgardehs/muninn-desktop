@@ -79,6 +79,7 @@ A daily journal entry. Inherits title and tags from `note`.
 | `description`   | string            | One-line summary, shown in `type list`                          |
 | `extends`       | string            | Inherit fields from another type                                |
 | `fields`        | map               | Field definitions (see below)                                   |
+| `computed`      | map               | Virtual fields defined as SQL expressions (see [Computed fields](#computed-fields)) |
 | `match`         | map               | Rules for matching notes that don't declare `type:` explicitly  |
 | `path_pattern`  | string            | Suggested filename pattern (advisory; used by future tooling)   |
 | `strict`        | `forbid` / `warn` | How to treat frontmatter keys not declared in `fields`          |
@@ -146,6 +147,37 @@ fields:
     type: datetime
     generated: now_on_write
 ```
+
+## Computed fields
+
+A type can declare virtual fields whose value is a SQL expression
+evaluated against the note's real frontmatter (plus the synthetic
+`path`, `title`, `tags` columns). Computed fields behave like any
+other column in `SELECT`, `WHERE`, `ORDER BY`, and script `query()`
+calls — they just aren't stored on disk.
+
+```yaml
+---
+name: task
+fields:
+  title: {type: string, required: true}
+  status: {type: enum, values: [active, done, archived]}
+  deadline: {type: date}
+computed:
+  is_open: "status = 'active'"
+  days_until: "DATE_ADD(deadline, 0)"
+---
+```
+
+```sql
+SELECT title, is_open, days_until FROM task WHERE is_open
+```
+
+Computed expressions can reference other fields including other
+computed fields; recursion depth is capped at 16 levels. A bad
+expression surfaces as a query error the first time the column is
+used, not at type-load time — validate your type definitions by
+running a query against them.
 
 ## Inheritance
 

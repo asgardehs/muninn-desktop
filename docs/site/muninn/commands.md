@@ -22,6 +22,9 @@ the platform default (see [Configuration](/docs/muninn/configuration/)).
 | `type show`          | Show a type's fields and inheritance              | [Types](/docs/muninn/types/)           |
 | `validate`           | Validate notes against their type schemas         | [Types](/docs/muninn/types/)           |
 | `query`              | Run a SQL query over frontmatter                  | [Query](/docs/muninn/query/)           |
+| `runestone list`     | List saved Runestone views                        | [Runestones](/docs/muninn/runestones/) |
+| `runestone show`     | Print a Runestone's YAML definition               | [Runestones](/docs/muninn/runestones/) |
+| `runestone eval`     | Evaluate a Runestone and print its rows           | [Runestones](/docs/muninn/runestones/) |
 | `run`                | Execute a `.rhai` script against the vault        | [Scripting](/docs/muninn/scripting/)   |
 | `render`             | Render a note with its `muninn` blocks evaluated  | [Scripting](/docs/muninn/scripting/)   |
 | `lint`               | Check grammar and spelling                        | [Lint](/docs/muninn/lint/)             |
@@ -36,7 +39,7 @@ the platform default (see [Configuration](/docs/muninn/configuration/)).
 
 The `--json` flag is honored by every command that produces listable
 output: `note list`, `note search`, `search`, `type list`, `type show`,
-`validate`, and `query`.
+`validate`, `query`, and `runestone`.
 
 ## Help
 
@@ -47,6 +50,14 @@ muninn --help              # top-level command list
 muninn note --help         # subcommands of `note`
 muninn query --help        # flags for `query`
 ```
+
+## Related binaries
+
+The vault ships with a second binary:
+
+| Binary          | Purpose                                                            | Page                                 |
+| --------------- | ------------------------------------------------------------------ | ------------------------------------ |
+| `muninn-server` | Standalone HTTP API for the same operations, used by other Asgard tools | [HTTP API](/docs/muninn/http-api/)   |
 
 See also: [Configuration](/docs/muninn/configuration/) for environment
 variables and default paths.
